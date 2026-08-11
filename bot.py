@@ -122,40 +122,73 @@ async def cmd_start(message: types.Message):
 async def process_check_activation(message: types.Message, check_id: str):
     """Обработка активации чека по ссылке"""
     checks = load_checks()
+    users = load_users()
+    user_id = str(message.from_user.id)
     
-    if check_id in checks:
-        amount = checks[check_id]["amount"]
-        transaction_id = checks[check_id].get("transaction_id", "UNKNOWN")
-        
-        # Начисляем баланс
-        users = load_users()
-        user_id = str(message.from_user.id)
-        if user_id not in users:
-            users[user_id] = {
-                "balance": 0,
-                "checks_created": 0,
-                "stars_spent": 0,
-                "username": message.from_user.username or "нет",
-                "first_name": message.from_user.first_name or "нет"
-            }
-        users[user_id]["balance"] += amount
-        save_users(users)
-        
-        # Сообщение об успешном получении
+    # Проверяем существует ли чек
+    if check_id not in checks:
         await message.answer(
-            f"✅ *Получено {amount} ⭐!*\n\n"
-            f"📦 От чека: `{check_id}`\n"
-            f"💳 ID транзакции: `{transaction_id}`\n\n"
-            f"💰 Звёзды зачислены на ваш баланс.\n"
-            f"👉 Чтобы вывести звёзды, перейдите в раздел *Баланс*",
-            parse_mode="Markdown",
+            "❌ Чек не найден.",
             reply_markup=main_keyboard()
         )
-    else:
+        return
+    
+    # Проверяем не активирован ли уже чек
+    if checks[check_id].get("activated", False):
         await message.answer(
-            "❌ Чек не найден или уже был активирован.",
+            "❌ Этот чек уже был активирован ранее.",
             reply_markup=main_keyboard()
         )
+        return
+    
+    # Проверяем не активировал ли этот юзер чек раньше
+    if user_id in users:
+        activated_checks = users[user_id].get("activated_checks", [])
+        if check_id in activated_checks:
+            await message.answer(
+                "❌ Вы уже активировали этот чек.",
+                reply_markup=main_keyboard()
+            )
+            return
+    
+    # Активируем чек
+    amount = checks[check_id]["amount"]
+    transaction_id = checks[check_id].get("transaction_id", "UNKNOWN")
+    
+    # Помечаем чек как активированный
+    checks[check_id]["activated"] = True
+    checks[check_id]["activated_by"] = user_id
+    checks[check_id]["activated_at"] = str(message.date)
+    save_checks(checks)
+    
+    # Начисляем баланс юзеру
+    if user_id not in users:
+        users[user_id] = {
+            "balance": 0,
+            "checks_created": 0,
+            "stars_spent": 0,
+            "activated_checks": [],
+            "username": message.from_user.username or "нет",
+            "first_name": message.from_user.first_name or "нет"
+        }
+    
+    if "activated_checks" not in users[user_id]:
+        users[user_id]["activated_checks"] = []
+    
+    users[user_id]["balance"] += amount
+    users[user_id]["activated_checks"].append(check_id)
+    save_users(users)
+    
+    # Сообщение об успешном получении
+    await message.answer(
+        f"✅ *Получено {amount} ⭐!*\n\n"
+        f"📦 От чека: `{check_id}`\n"
+        f"💳 ID транзакции: `{transaction_id}`\n\n"
+        f"💰 Звёзды зачислены на ваш баланс.\n"
+        f"👉 Чтобы вывести звёзды, перейдите в раздел *Баланс*",
+        parse_mode="Markdown",
+        reply_markup=main_keyboard()
+    )
 
 @dp.message(Command("menu"))
 async def cmd_menu(message: types.Message):
@@ -175,7 +208,7 @@ async def process_amount(message: types.Message, state: FSMContext):
         return
     try:
         amount = int(message.text)
-        check_id = generate_check_id()  # Без точки
+        check_id = generate_check_id()
         transaction_id = generate_transaction_id()
         
         checks = load_checks()
@@ -183,7 +216,8 @@ async def process_amount(message: types.Message, state: FSMContext):
             "amount": amount,
             "transaction_id": transaction_id,
             "created_by": ADMIN_ID,
-            "created_at": str(message.date)
+            "created_at": str(message.date),
+            "activated": False
         }
         save_checks(checks)
         
@@ -221,7 +255,16 @@ async def cmd_checks(message: types.Message):
     text = "📋 <b>Список чеков:</b>\n\n"
     for cid, data in checks.items():
         tx_id = data.get("transaction_id", "N/A")
-        text += f"🆔 <code>{cid}</code>\n💎 {data['amount']} ⭐\n💳 TX: <code>{tx_id}</code>\n📅 {data['created_at']}\n\n"
+        status = "✅ Активирован" if data.get("activated") else "⏳ Ожидает"
+        activated_by = data.get("activated_by", "—")
+        text += (
+            f"🆔 <code>{cid}</code>\n"
+            f"💎 {data['amount']} ⭐\n"
+            f"💳 TX: <code>{tx_id}</code>\n"
+            f"📊 Статус: {status}\n"
+            f"👤 Активировал: <code>{activated_by}</code>\n"
+            f"📅 {data['created_at']}\n\n"
+        )
     await message.answer(text, parse_mode="HTML")
 
 # Кнопки из инлайн меню
@@ -256,12 +299,14 @@ async def profile_handler(message: types.Message):
             "balance": 0,
             "checks_created": 0,
             "stars_spent": 0,
+            "activated_checks": [],
             "username": message.from_user.username or "нет",
             "first_name": message.from_user.first_name or "нет"
         }
         save_users(users)
     
     u = users[user_id]
+    activated_count = len(u.get("activated_checks", []))
     text = (
         f"👤 *Профиль*\n\n"
         f"🆔 ID: `{user_id}`\n"
@@ -269,6 +314,7 @@ async def profile_handler(message: types.Message):
         f"📛 Юзернейм: @{u['username']}\n"
         f"💎 Баланс: {u['balance']} ⭐\n"
         f"📦 Создано чеков: {u['checks_created']}\n"
+        f"🎁 Активировано чеков: {activated_count}\n"
         f"💸 Потрачено звёзд: {u['stars_spent']} ⭐"
     )
     await message.answer(text, parse_mode="Markdown")

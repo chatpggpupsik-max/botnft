@@ -3,26 +3,29 @@ import os
 import sys
 import threading
 import time
+from flask import Flask
 
 def run_flask():
-    from server import app
+    # Импортируем внутри чтобы избежать конфликтов
+    import server
     port = int(os.environ.get('PORT', 10000))
-    # Важно: запускаем без debug=True, без reloader
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    server.app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 def run_bot():
     import asyncio
-    from bot import main
-    asyncio.run(main())
+    import bot
+    asyncio.run(bot.main())
 
 if __name__ == '__main__':
+    print(f"Starting services on port {os.environ.get('PORT', 10000)}...")
+    
     # Flask в отдельном потоке
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     
-    # Даём Flask время запуститься
-    time.sleep(3)
-    print("✅ Flask запущен, порт открыт")
+    # Ждём запуска Flask
+    time.sleep(5)
+    print("✅ All services started")
     
-    # Бот в основном потоке
+    # Бот
     run_bot()

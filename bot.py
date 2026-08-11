@@ -1,6 +1,6 @@
-# bot.py
 import asyncio
 import logging
+import os
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
@@ -8,12 +8,15 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 import json
-import os
 
 TOKEN = "8980089433:AAE422NHqh7ajzxOIS64PoNDVHStrDF8fKE"
 ADMIN_ID = 8503291981
 RECEIVER_USERNAME = "@Defbymorgenshtern"
-RENDER_URL = os.getenv("RENDER_URL", "https://your-app.onrender.com")
+
+# Автоопределение URL
+RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "")
+if not RENDER_URL:
+    RENDER_URL = f"https://{os.getenv('RENDER_SERVICE_NAME', 'app')}.onrender.com"
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
@@ -119,13 +122,6 @@ async def withdraw_request(callback: types.CallbackQuery):
 async def profile(callback: types.CallbackQuery):
     await callback.message.answer(f"👤 Ваш профиль\n\n⭐ Баланс: доступен после авторизации\n🎁 Подарки: проверьте в /menu")
     await callback.answer()
-
-@dp.message()
-async def catch_all(message: types.Message):
-    if message.from_user.id == ADMIN_ID:
-        await message.answer("Используйте /admin для создания чека или /checks для просмотра.")
-    else:
-        await message.answer("Используйте /menu для доступа к функциям.")
 
 async def main():
     await dp.start_polling(bot)

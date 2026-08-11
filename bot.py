@@ -4,6 +4,7 @@ import logging
 import os
 import random
 import string
+import time
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, BotCommand
@@ -42,9 +43,14 @@ def generate_transaction_id():
     """Генерирует фейковый ID транзакции"""
     chars = string.ascii_uppercase + string.digits
     random_part = ''.join(random.choices(chars, k=16))
-    import time
     timestamp = str(int(time.time() * 1000))[-8:]
     return f"TON{random_part}{timestamp}"
+
+def generate_check_id():
+    """Генерирует ID чека без точки (точка запрещена в deep link)"""
+    timestamp = str(int(time.time() * 1000))  # миллисекунды, без точки
+    random_suffix = ''.join(random.choices(string.digits, k=4))
+    return f"check_{timestamp}_{random_suffix}"
 
 def load_checks():
     if os.path.exists(CHECKS_FILE):
@@ -169,7 +175,7 @@ async def process_amount(message: types.Message, state: FSMContext):
         return
     try:
         amount = int(message.text)
-        check_id = f"check_{message.date.timestamp()}"
+        check_id = generate_check_id()  # Без точки
         transaction_id = generate_transaction_id()
         
         checks = load_checks()

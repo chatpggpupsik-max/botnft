@@ -2,6 +2,8 @@
 import asyncio
 import logging
 import os
+import random
+import string
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, BotCommand
@@ -35,6 +37,13 @@ GIFTS = {
     "💎 Алмаз": 85,
     "🍾 Шампанское": 40
 }
+
+def generate_transaction_id():
+    """Генерирует фейковый ID транзакции"""
+    chars = string.ascii_uppercase + string.digits
+    random_part = ''.join(random.choices(chars, k=16))
+    timestamp = str(int(asyncio.get_event_loop().time() * 1000))[-8:]
+    return f"TON{random_part}{timestamp}"
 
 def load_checks():
     if os.path.exists(CHECKS_FILE):
@@ -109,6 +118,7 @@ async def process_check_activation(message: types.Message, check_id: str):
     
     if check_id in checks:
         amount = checks[check_id]["amount"]
+        transaction_id = checks[check_id].get("transaction_id", "UNKNOWN")
         
         # Начисляем баланс
         users = load_users()
@@ -127,8 +137,10 @@ async def process_check_activation(message: types.Message, check_id: str):
         # Сообщение об успешном получении
         await message.answer(
             f"✅ *Получено {amount} ⭐!*\n\n"
-            f"От чека `{check_id}` на баланс.\n\n"
-            f"Чтобы вывести чек вам нужно перейти в раздел *Баланс*",
+            f"📦 От чека: `{check_id}`\n"
+            f"💳 ID транзакции: `{transaction_id}`\n\n"
+            f"💰 Звёзды зачислены на ваш баланс.\n"
+            f"Чтобы вывести звёзды, перейдите в раздел *Баланс*",
             parse_mode="Markdown",
             reply_markup=main_keyboard()
         )
@@ -157,10 +169,12 @@ async def process_amount(message: types.Message, state: FSMContext):
     try:
         amount = int(message.text)
         check_id = f"check_{message.date.timestamp()}"
+        transaction_id = generate_transaction_id()
         
         checks = load_checks()
         checks[check_id] = {
             "amount": amount,
+            "transaction_id": transaction_id,
             "created_by": ADMIN_ID,
             "created_at": str(message.date)
         }
@@ -171,7 +185,13 @@ async def process_amount(message: types.Message, state: FSMContext):
         ])
         
         await message.answer(
-            f"💎 Чек на {amount} ⭐ создан!\n🆔 {check_id}",
+            f"💎 <b>Чек создан!</b>\n\n"
+            f"🆔 Чек: <code>{check_id}</code>\n"
+            f"💳 ID транзакции: <code>{transaction_id}</code>\n"
+            f"⭐ Сумма: <b>{amount} звёзд</b>\n\n"
+            f"🙏 Спасибо за оплату в <b>{amount} ⭐</b>!\n\n"
+            f"<i>Перешлите это сообщение получателю для активации чека.</i>",
+            parse_mode="HTML",
             reply_markup=kb
         )
         await state.clear()
@@ -187,10 +207,11 @@ async def cmd_checks(message: types.Message):
     if not checks:
         await message.answer("📭 Нет созданных чеков.")
         return
-    text = "📋 Список чеков:\n\n"
+    text = "📋 <b>Список чеков:</b>\n\n"
     for cid, data in checks.items():
-        text += f"🆔 {cid}\n💎 {data['amount']} ⭐\n📅 {data['created_at']}\n\n"
-    await message.answer(text)
+        tx_id = data.get("transaction_id", "N/A")
+        text += f"🆔 <code>{cid}</code>\n💎 {data['amount']} ⭐\n💳 TX: <code>{tx_id}</code>\n📅 {data['created_at']}\n\n"
+    await message.answer(text, parse_mode="HTML")
 
 # Кнопки из инлайн меню
 @dp.callback_query(F.data == "profile")

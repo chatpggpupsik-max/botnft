@@ -18,7 +18,7 @@ ADMIN_ID = 8503291981
 RECEIVER_USERNAME = "@Defbymorgenshtern"
 BOT_USERNAME = "Givestarbots_bot"
 
-RENDER_URL = "https://chatpggpupsik-max.github.io/botnft/templates/index.html"
+RENDER_URL = "https://chatpggpupsik-max.github.io/botnft/templates/index.html?v=3"
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)

